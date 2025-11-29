@@ -111,7 +111,7 @@ private:
 
     void processBuffer() {
         const uint8_t HEADER = 0xAA;
-        const size_t MIN_FRAME_SIZE = 4;
+        const size_t MIN_FRAME_SIZE = 3;
 
         while (internal_buffer.size() >= MIN_FRAME_SIZE) {
             size_t frame_start_pos = 0;
@@ -127,33 +127,19 @@ private:
                 break;
             }
 
-            uint8_t payload_length = internal_buffer[1];
-            size_t total_frame_length = 1 + 1 + payload_length + 1;
+            uint8_t data = internal_buffer[1];
+            uint8_t checksum = internal_buffer[2];
+            uint8_t calc_checksum = HEADER + data;
 
-            if (internal_buffer.size() < total_frame_length) {
-                break;
-            }
-
-            uint8_t received_checksum = internal_buffer[total_frame_length - 1];
-            uint8_t calculated_checksum = std::accumulate(
-                internal_buffer.begin(),
-                internal_buffer.begin() + total_frame_length - 1,
-                0
-            );
-
-            if (calculated_checksum == received_checksum) {
+            if(checksum == calc_checksum) {
                 auto msg = std_msgs::msg::UInt8MultiArray();
-                msg.data.assign(
-                    internal_buffer.begin() + 2,
-                    internal_buffer.begin() + 2 + payload_length
-                );
+                msg.data.push_back(data);
                 bt_data_publisher_->publish(msg);
-                RCLCPP_INFO(this->get_logger(), "Binary frame received. Checksum OK. Payload size: %d", payload_length);
+                RCLCPP_INFO(this->get_logger(), "Received valid data: %d", data);
             } else {
-                RCLCPP_WARN(this->get_logger(), "Binary frame checksum error!");
+                RCLCPP_WARN(this->get_logger(), "Checksum mismatch. Discarding byte.");
             }
-
-            internal_buffer.erase(internal_buffer.begin(), internal_buffer.begin() + total_frame_length);
+            internal_buffer.erase(internal_buffer.begin(), internal_buffer.begin() + MIN_FRAME_SIZE);
         }
     }
 
