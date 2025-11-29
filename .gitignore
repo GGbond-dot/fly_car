@@ -1,0 +1,16 @@
+# filepath: /home/orangeppi/ros2_ws/.gitignore
+# ROS2 工作区常用忽略项
+build/
+install/
+log/
+*.pyc
+*.pyo
+*.swp
+*.log
+.vscode/
+.idea/
+*.db
+*.egg-info/
+*.pytest_cache/
+*.coverage
+.rosinstall
