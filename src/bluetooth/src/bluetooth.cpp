@@ -32,7 +32,7 @@ public:
       last_animal_type_(-1), consecutive_count_(0) // 2. 移除 running_ 的初始化
     {
         this->declare_parameter<std::string>("port", "/dev/ttyUSB2");
-        this->declare_parameter<int>("baudrate", 115200);
+        this->declare_parameter<int>("baudrate", 9600);
 
         std::string port = this->get_parameter("port").as_string();
 
