@@ -16,7 +16,7 @@
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
-
+#include <std_msgs/msg/u_int8_multi_array.hpp>
 #include <serial_comm/serial_comm.h>
 
 namespace uart_to_stm32
@@ -51,6 +51,7 @@ private:
 
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr velocity_sub_;
   rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr target_velocity_sub_;
+  rclcpp::Subscription<std_msgs::msg::UInt8MultiArray>::SharedPtr bluetooth_sub_;
 
   std::unique_ptr<serial_comm::SerialComm> serial_comm_;
 
@@ -58,6 +59,7 @@ private:
   rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr is_st_ready_pub_;
   rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr mission_step_pub_;
 
+  void bluetoothCallback(const std_msgs::msg::UInt8MultiArray::SharedPtr msg);
   double current_yaw_;
   bool yaw_valid_;
   geometry_msgs::msg::Twist current_velocity_;
