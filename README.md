@@ -17,6 +17,7 @@ Fly Car 是一个集成了多种传感器和控制算法的自主智能小车项
 
 - **[学习指南 (STUDY_GUIDE.md)](./STUDY_GUIDE.md)** - 详细的技术知识点总结和考试重点
 - **[系统架构 (ARCHITECTURE.md)](./ARCHITECTURE.md)** - 系统架构图和数据流向图
+- **[ROS2 命令速查表 (ROS2_COMMANDS.md)](./ROS2_COMMANDS.md)** - 常用 ROS2 命令快速参考
 
 这些文档涵盖了：
 - ROS2 核心概念和通信机制
@@ -24,6 +25,7 @@ Fly Car 是一个集成了多种传感器和控制算法的自主智能小车项
 - 坐标变换和 SLAM 原理
 - 系统架构和模块设计
 - 常见问题和调试技巧
+- ROS2 实用命令和调试方法
 
 ## 快速开始
 
