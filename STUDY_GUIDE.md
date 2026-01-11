@@ -108,7 +108,7 @@ pid_yaw_kp: 0.5  # 偏航角比例增益
 PID 控制器的数学表达式：
 
 ```
-u(t) = Kp * e(t) + Ki * ∫e(t)dt + Kd * de(t)/dt
+u(t) = Kp * e(t) + Ki * ∫[0→t]e(τ)dτ + Kd * de(t)/dt
 ```
 
 其中：
@@ -133,8 +133,12 @@ u(t) = Kp * e(t) + Ki * ∫e(t)dt + Kd * de(t)/dt
 
 **变换查询**:
 ```cpp
-geometry_msgs::msg::TransformStamped transform;
-transform = tf_buffer_->lookupTransform(target_frame, source_frame, tf2::TimePointZero);
+try {
+  geometry_msgs::msg::TransformStamped transform;
+  transform = tf_buffer_->lookupTransform(target_frame, source_frame, tf2::TimePointZero);
+} catch (const tf2::TransformException & ex) {
+  RCLCPP_ERROR(logger, "TF lookup failed: %s", ex.what());
+}
 ```
 
 ### 路径跟踪算法

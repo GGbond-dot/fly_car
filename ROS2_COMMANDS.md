@@ -71,9 +71,6 @@ ros2 run tf2_tools view_frames
 
 # 查看两个坐标系之间的变换
 ros2 run tf2_ros tf2_echo <source_frame> <target_frame>
-
-# 查看 TF 树状态
-ros2 run tf2_tools echo <source_frame> <target_frame>
 ```
 
 ## 参数 (Parameter) 相关命令
@@ -352,7 +349,7 @@ ros2 param set --help
 ## 考试重点命令
 
 | 命令 | 功能 | 重要性 |
-|------|------|--------|
+| ---- | ---- | ------ |
 | `ros2 node list` | 查看节点 | ⭐⭐⭐⭐⭐ |
 | `ros2 topic echo` | 监听话题 | ⭐⭐⭐⭐⭐ |
 | `ros2 topic list` | 查看话题 | ⭐⭐⭐⭐⭐ |
