@@ -7,6 +7,13 @@
   <maintainer email="ubuntu@todo.todo">ubuntu</maintainer>
   <license>Apache-2.0</license>
 
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>my_carto_pkg</exec_depend>
+  <exec_depend>uart_to_stm32</exec_depend>
+  <exec_depend>pid_control_pkg</exec_depend>
+  <exec_depend>activity_control_pkg</exec_depend>
+
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
   <test_depend>ament_pep257</test_depend>

@@ -81,11 +81,9 @@ public:
     const rclcpp::NodeOptions & options = rclcpp::NodeOptions());
 
 private:
-  void readyCallback(const std_msgs::msg::UInt8::SharedPtr msg);
   void addTimerCallback();
 
   std::shared_ptr<RouteTargetPublisherNode> route_node_;
-  rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr ready_sub_;
   rclcpp::TimerBase::SharedPtr add_timer_;
 
   bool started_;

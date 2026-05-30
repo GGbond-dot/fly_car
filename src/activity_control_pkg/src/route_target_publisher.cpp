@@ -136,24 +136,6 @@ void RouteTargetPublisherNode::is_st_ready_callback(const std_msgs::msg::UInt8::
   }
 }
 
-// bool RouteTargetPublisherNode::isReached(
-//   const Target & target,
-//   double x_cm,
-//   double y_cm,
-//   double z_cm,
-//   double yaw_deg) const
-// {
-//   const double dx = target.x_cm - x_cm;
-//   const double dy = target.y_cm - y_cm;
-//   const double dxy = std::hypot(dx, dy);
-//   const double dz = target.z_cm - z_cm;
-//   const double dyaw = normalizeAngleDeg(target.yaw_deg - yaw_deg);
-//   // 容忍度动态选择
-//   const double z_tol = ever_received_st_ready_ ? height_tol_cm_ : 20.0;            // 飞机： 6 cm   车：20 cm 
-//   const bool z_ok = (std::fabs(dz) <= z_tol);
-//   // const bool z_ok = has_height_ ? (std::fabs(dz) <= height_tol_cm_) : true;
-//   return z_ok && (dxy <= pos_tol_cm_) && (std::fabs(dyaw) <= yaw_tol_deg_);
-// }
 
 bool RouteTargetPublisherNode::isReached(
   const Target & target,
@@ -167,7 +149,7 @@ bool RouteTargetPublisherNode::isReached(
   const double dxy = std::hypot(dx, dy);
   const double dz = target.z_cm - z_cm;
   const double dyaw = normalizeAngleDeg(target.yaw_deg - yaw_deg);
-  
+
   const double z_tol = ever_received_st_ready_ ? height_tol_cm_ : 20.0;
   const bool z_ok = (std::fabs(dz) <= z_tol);
   const bool xy_ok = (dxy <= pos_tol_cm_);
@@ -238,80 +220,33 @@ double RouteTargetPublisherNode::normalizeAngleDeg(double angle_deg) const
   return angles::to_degrees(normalized);
 }
 
-// RouteTestNode::RouteTestNode(
-//   const std::shared_ptr<RouteTargetPublisherNode> & route_node,
-//   const rclcpp::NodeOptions & options)
-// : rclcpp::Node("route_test_node", options),
-//   route_node_(route_node),
-//   started_(false),
-//   next_target_index_(1)
-// {
-//   std::setlocale(LC_ALL, "");
-
-//   ready_sub_ = create_subscription<std_msgs::msg::UInt8>(
-//     "/is_st_ready", rclcpp::QoS(10),
-//     std::bind(&RouteTestNode::readyCallback, this, std::placeholders::_1));
-
-//   add_timer_ = create_wall_timer(
-//     std::chrono::seconds(1),
-//     std::bind(&RouteTestNode::addTimerCallback, this));
-//   add_timer_->cancel();
-
-//   RCLCPP_INFO(get_logger(), "Route test node ready. 等待 /is_st_ready == 1");
-// }
-
-// void RouteTestNode::readyCallback(const std_msgs::msg::UInt8::SharedPtr msg)
-// {
-//   if (msg->data == 1 && !started_) {
-//     Target first{0.0, 0.0, 140, 0.0};
-//     route_node_->addTarget(first);
-//     const auto current = route_node_->currentIndex();
-//     RCLCPP_INFO(get_logger(),
-//       "收到 /is_st_ready=1，添加首个目标: x=%.1f y=%.1f z=%.1f yaw=%.1f | 当前第 %zu 个目标",
-//       first.x_cm, first.y_cm, first.z_cm, first.yaw_deg,
-//       (current == std::numeric_limits<std::size_t>::max() ? 0 : current + 1));
-//     add_timer_->reset();
-//     started_ = true;
-//   } else if (!started_) {
-//     RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 5000,
-//       "/is_st_ready=%u，等待为1", static_cast<unsigned>(msg->data));
-//   }
-// }
 
 RouteTestNode::RouteTestNode(
   const std::shared_ptr<RouteTargetPublisherNode> & route_node,
   const rclcpp::NodeOptions & options)
 : rclcpp::Node("route_test_node", options),
   route_node_(route_node),
-  started_(false), // started_ 标志仍然有用，但现在在构造函数中设置
+  started_(false),
   next_target_index_(1)
 {
   std::setlocale(LC_ALL, "");
 
-  // 1. 移除 /is_st_ready 的订阅
-  // ready_sub_ = create_subscription<std_msgs::msg::UInt8>(...); // 此行已被删除
-
-  // 创建定时器，但先不启动
   add_timer_ = create_wall_timer(
     std::chrono::seconds(1),
     std::bind(&RouteTestNode::addTimerCallback, this));
   add_timer_->cancel();
 
-  // 2. 直接执行添加第一个目标点的逻辑
   RCLCPP_INFO(get_logger(), "Route test node 启动，自动添加首个目标。");
-  
-  // Target first{0.0, 0.0, 160, 0.0};
+
   Target first{200.0, 0.0, 4.0, 0.0};
   route_node_->addTarget(first);
-  
-  // 3. 保留并更新日志信息
+
   const auto current = route_node_->currentIndex();
   RCLCPP_INFO(get_logger(),
     "添加首个目标: x=%.1f y=%.1f z=%.1f yaw=%.1f | 当前第 %zu 个目标",
     first.x_cm, first.y_cm, first.z_cm, first.yaw_deg,
     (current == std::numeric_limits<std::size_t>::max() ? 0 : current + 1));
-  
-  // 4. 启动定时器以添加后续目标，并设置标志位
+
   add_timer_->reset();
   started_ = true;
 }
