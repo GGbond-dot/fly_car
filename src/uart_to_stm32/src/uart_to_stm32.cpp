@@ -233,7 +233,21 @@ void UartToStm32::targetVelocityCallback(const std_msgs::msg::Float32MultiArray:
     "Target Velocity: linear(%.1f, %.1f, %.1f)cm/s angular(%.1f)deg/s",
     vx_cm_per_s, vy_cm_per_s, vz_cm_per_s, vyaw_deg_per_s);
 
-  sendTargetVelocityToSerial(vx_cm_per_s, vy_cm_per_s, vz_cm_per_s, vyaw_deg_per_s);
+  // 目标速度由 PID 在 map 系下计算得到，飞控期望机体系，
+  // 因此与当前速度通路一致，用当前 yaw 做 map->body 旋转后再下发。
+  if (yaw_valid_) {
+    const Eigen::Vector3d v_map(vx_cm_per_s, vy_cm_per_s, vz_cm_per_s);
+    const Eigen::Vector3d v_body = transformVelocity(v_map, current_yaw_);
+    sendTargetVelocityToSerial(
+      static_cast<float>(v_body.x()),
+      static_cast<float>(v_body.y()),
+      static_cast<float>(v_body.z()),
+      vyaw_deg_per_s);
+  } else {
+    RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 2000,
+      "Yaw not yet valid, sending target velocity without map->body rotation");
+    sendTargetVelocityToSerial(vx_cm_per_s, vy_cm_per_s, vz_cm_per_s, vyaw_deg_per_s);
+  }
 }
 
 void UartToStm32::sendTargetVelocityToSerial(float vx_cm_per_s, float vy_cm_per_s, float vz_cm_per_s, float vyaw_deg_per_s)

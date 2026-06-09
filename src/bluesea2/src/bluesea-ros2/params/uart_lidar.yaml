@@ -25,7 +25,7 @@ bluesea_node:
     error_scale: 0.8
 #CONNECT#
     type: "uart"
-    port: "/dev/ttyS3"
+    port: "/dev/ttyS4"
     baud_rate: 921600
   #GET#
     uuid:  -1

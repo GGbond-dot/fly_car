@@ -29,7 +29,7 @@ def generate_launch_description():
     ## ***** Launch arguments *****
     lidar_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
-            os.path.join(FindPackageShare('bluesea2').find('bluesea2'), 'launch', 'udp_lidar.launch')
+            os.path.join(FindPackageShare('bluesea2').find('bluesea2'), 'launch', 'uart_lidar.launch')
         )
     )
 

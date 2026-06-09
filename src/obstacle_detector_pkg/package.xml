@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>obstacle_detector_pkg</name>
+  <version>0.1.0</version>
+  <description>用激光雷达 + TF 检测车前方的长障碍物（墙），单条直线拟合输出线段几何。</description>
+
+  <maintainer email="AngelBabydoi@computer4u.com">kian</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2_geometry_msgs</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
