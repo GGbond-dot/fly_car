@@ -21,6 +21,7 @@
   - `src/my_launch/` — 总启动入口
   - `src/serial_comm/` — 串口协议库
   - `src/bluesea2/` — 蓝海激光雷达驱动
+  - `src/pose_sender_pkg/` — 飞车位姿 UDP 发送（20Hz 查 `map<-laser_link` TF 发给地面车，供其跟随；协议与对端见 `../car/docs/follow_fly_car_design.md` §2.1。本项目新增，✅。注意 `ROS_DOMAIN_ID` 必须与车板的 10 错开）
 
 **硬约束（必须遵守）**：
 - **双设备开发**：本地只写代码 + git；编译运行在开发板上（`colcon build`），代码用 **syncpi** 传过去。**本地不要执行 `colcon build`，也不要声称"已编译验证"**。验证以开发板为准。
