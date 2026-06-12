@@ -39,18 +39,18 @@
                                               ├─► RouteTargetPublisher ─/target_position─► pid_control ─► uart_to_stm32 ─► 飞控
 障碍决策(待实现)──遇墙时插入[起飞→越过→降落]航点─┘
                               ▲
-        obstacle_detector(已完成)──/detected_obstacle(折线顶点 + perp_dist)
+        obstacle_detector(静态场景实测通过)──/detected_obstacle(路线阻挡墙 + path_dist)
 ```
 
 ### 模块清单
 
 | 模块 | 状态 | 职责 |
 | --- | --- | --- |
-| `obstacle_detector_pkg` | ✅ 已完成 | 激光+TF 折线检测，发 `/detected_obstacle`，详见 `obstacle_detector_pkg.md` |
+| `obstacle_detector_pkg` | ✅ 静态场景上板实测通过 | 激光+TF 拟合所有有效墙体，结合当前地面 `/target_position` 只发布阻挡路线的最近墙及 `path_dist` |
 | `RouteTargetPublisher` | ✅ 已存在 | 航点队列 + 到达推进 + z 编码起降 |
 | `pid_control_pkg` / `uart_to_stm32` | ✅ 已存在 | 航点跟踪 + 下发飞控 |
 | **覆盖生成器** | ⬜ 待实现 | 已知场地边界 + 行距 → 生成弓字形地面航点灌入队列 |
-| **障碍决策** | ⬜ 待实现 | 订阅 `/detected_obstacle`，`perp_dist < 阈值` 时按折线几何插入越障航点 |
+| **障碍决策** | ⬜ 待实现 | 订阅 `/detected_obstacle`，`path_dist < 阈值` 时按折线几何插入越障航点 |
 
 ## 五、两个待实现节点的设计
 
@@ -61,8 +61,8 @@
 
 ### 2. 障碍决策（遇墙起飞）
 
-- 订阅 `/detected_obstacle`（折线顶点串 + `perp_dist` + `total_length`）。
-- 触发：`perp_dist < approach_threshold` 且当前在地面遍历态。
+- 订阅 `/detected_obstacle`（折线顶点串 + `path_dist` + `total_length`）。
+- 触发：`path_dist < approach_threshold` 且当前在地面遍历态。
 - 跨越点计算：取离车最近那一段，求中点与法向；沿法向在墙前/墙后各留安全余量，得到"墙前起飞点"和"墙对面落点"。
 - 插入航点序列（用 z 编码）：
   1. 墙前起飞点（z = `flyover_z` 安全高度）
@@ -75,7 +75,8 @@
 - **场地边界**：`x_min/x_max/y_min/y_max`（map 系，cm 或 m）
 - **行距** `lane_spacing`
 - **巡航高度** `cruise_z`（地面值，参考现有测试 ~4cm）
-- **障碍检测 ROI**：`roi_x/y_min/max_m`（墙相对起飞点/map 原点的大致范围）
+- **障碍检测 ROI**：固定场地图测试使用 x∈[0,5]m、y∈[-4,0]m
+- **路线走廊半宽** `path_corridor_half_width_m`（当前默认 0.30m，需按车体宽度与定位误差实测）
 - **逼近触发阈值** `approach_threshold`（车到墙多近开始起飞）
 - **越障安全高度** `flyover_z`
 - **墙前后安全余量**（起飞点距墙、落点距墙各留多少）

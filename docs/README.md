@@ -32,7 +32,7 @@
 | 话题 | 类型 | 产生者 → 消费者 | 说明 |
 | --- | --- | --- | --- |
 | `/scan` | LaserScan | 雷达 → 检测 | 单线激光 |
-| `/detected_obstacle` | Float32MultiArray | obstacle_detector → 决策 | 折线顶点串，布局见[包文档](obstacle_detector_pkg.md) |
+| `/detected_obstacle` | Float32MultiArray | obstacle_detector → 决策 | 阻挡当前航点路线的折线顶点串，布局见[包文档](obstacle_detector_pkg.md) |
 | `/obstacle_detect_enable` | Bool | 决策 → obstacle_detector | 边沿使能检测 |
 | `/target_position` | Float32MultiArray | RouteTargetPublisher → pid | `[x_cm,y_cm,z_cm,yaw_deg]` |
 | `/target_velocity` | Float32MultiArray | pid → uart_to_stm32 | `[vx,vy,vz cm/s, vyaw deg/s]` |
@@ -50,7 +50,8 @@
 传感器/检测                 决策/航点                 控制/下发              飞控
 ─────────                  ─────────                ─────────             ────
 /scan + TF                                                                  ↑
-  ├─ obstacle_detector ─► /detected_obstacle ─► 障碍决策(待实现) ─┐
+  ├─ obstacle_detector ◄─ /target_position（当前地面航点）
+  │         └──────────► /detected_obstacle（路线阻挡墙 + path_dist）─► 障碍决策(待实现) ─┐
   │                                                               ├─► RouteTargetPublisher
   └─ (覆盖生成器, 待实现) ──── 弓字形地面航点 ───────────────────┘   │ /target_position
                                                                        ▼
@@ -82,6 +83,6 @@
 
 | 模块 | 状态 |
 | --- | --- |
-| obstacle_detector_pkg 折线检测 | ✅ 已完成(本地，待上板编译) |
+| obstacle_detector_pkg 路线阻挡墙检测 | ✅ 开发板静态场景实测通过：识别右侧+前方连续折线，并输出稳定 `path_dist`；动态接近与非阻挡路线仍待测 |
 | 覆盖生成器(弓字形航点) | ⬜ 待实现(等场地参数) |
 | 障碍决策(遇墙插入越障航点) | ⬜ 待实现(等场地参数) |

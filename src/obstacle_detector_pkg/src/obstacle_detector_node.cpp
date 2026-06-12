@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <utility>
 #include <vector>
 
 #include <geometry_msgs/msg/transform_stamped.hpp>
@@ -35,6 +36,53 @@ double pointToSegment(const Pt2 & p, const Pt2 & a, const Pt2 & b)
   t = std::max(0.0, std::min(1.0, t));
   const double px = a.x + t * dx, py = a.y + t * dy;
   return std::hypot(p.x - px, p.y - py);
+}
+
+// 求墙线段到当前路线段的最小距离，并返回对应路线进度 t（0=车，1=航点）。
+bool segmentPathDistance(
+  const Pt2 & route_start, const Pt2 & route_end, const Pt2 & wall_start, const Pt2 & wall_end,
+  double & min_dist, double & route_t)
+{
+  const double rx = route_end.x - route_start.x;
+  const double ry = route_end.y - route_start.y;
+  const double sx = wall_end.x - wall_start.x;
+  const double sy = wall_end.y - wall_start.y;
+  const double route_l2 = rx * rx + ry * ry;
+  if (route_l2 < 1e-12) { return false; }
+
+  min_dist = std::numeric_limits<double>::max();
+  route_t = 0.0;
+  auto consider = [&](double t, double distance) {
+      t = std::max(0.0, std::min(1.0, t));
+      if (distance < min_dist) {
+        min_dist = distance;
+        route_t = t;
+      }
+    };
+
+  const double cross = rx * sy - ry * sx;
+  if (std::fabs(cross) > 1e-9) {
+    const double qpx = wall_start.x - route_start.x;
+    const double qpy = wall_start.y - route_start.y;
+    const double t = (qpx * sy - qpy * sx) / cross;
+    const double u = (qpx * ry - qpy * rx) / cross;
+    if (t >= 0.0 && t <= 1.0 && u >= 0.0 && u <= 1.0) {
+      min_dist = 0.0;
+      route_t = t;
+      return true;
+    }
+  }
+
+  for (const Pt2 & wall_point : {wall_start, wall_end}) {
+    const double t = ((wall_point.x - route_start.x) * rx +
+      (wall_point.y - route_start.y) * ry) / route_l2;
+    const double clamped_t = std::max(0.0, std::min(1.0, t));
+    const Pt2 route_point{route_start.x + clamped_t * rx, route_start.y + clamped_t * ry};
+    consider(clamped_t, std::hypot(wall_point.x - route_point.x, wall_point.y - route_point.y));
+  }
+  consider(0.0, pointToSegment(route_start, wall_start, wall_end));
+  consider(1.0, pointToSegment(route_end, wall_start, wall_end));
+  return true;
 }
 
 // Douglas–Peucker：递归在残差最大处劈开，标记保留的顶点
@@ -76,6 +124,7 @@ ObstacleDetectorNode::ObstacleDetectorNode(const rclcpp::NodeOptions & options)
   split_threshold_m_   = declare_parameter("split_threshold_m",   0.05);
   merge_collinear_deg_ = declare_parameter("merge_collinear_deg", 10.0);
   min_total_length_m_  = declare_parameter("min_total_length_m",  0.50);
+  path_corridor_half_width_m_ = declare_parameter("path_corridor_half_width_m", 0.30);
 
   tf_timeout_sec_ = declare_parameter("tf_timeout_sec", 0.05);
 
@@ -94,6 +143,10 @@ ObstacleDetectorNode::ObstacleDetectorNode(const rclcpp::NodeOptions & options)
     enable_topic_, enable_qos,
     std::bind(&ObstacleDetectorNode::enableCallback, this, std::placeholders::_1));
 
+  target_sub_ = create_subscription<std_msgs::msg::Float32MultiArray>(
+    "/target_position", enable_qos,
+    std::bind(&ObstacleDetectorNode::targetCallback, this, std::placeholders::_1));
+
   obstacle_pub_ = create_publisher<std_msgs::msg::Float32MultiArray>(
     "/detected_obstacle",
     rclcpp::QoS(rclcpp::KeepLast(1)).transient_local().reliable());
@@ -110,6 +163,8 @@ ObstacleDetectorNode::ObstacleDetectorNode(const rclcpp::NodeOptions & options)
     "ROI(map): x=[%.2f, %.2f] y=[%.2f, %.2f]  断链=%.2fm 劈开阈值=%.3fm 合并转角=%.1f° 最短总长=%.2fm",
     roi_x_min_m_, roi_x_max_m_, roi_y_min_m_, roi_y_max_m_,
     chain_break_dist_m_, split_threshold_m_, merge_collinear_deg_, min_total_length_m_);
+  RCLCPP_INFO(get_logger(), "路径阻挡选择: target=/target_position corridor_half_width=%.2fm",
+    path_corridor_half_width_m_);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -121,6 +176,24 @@ void ObstacleDetectorNode::enableCallback(const std_msgs::msg::Bool::SharedPtr m
   if (msg->data == enabled_) { return; }
   enabled_ = msg->data;
   RCLCPP_INFO(get_logger(), enabled_ ? "检测使能：开始逐帧拟合..." : "检测禁用。");
+}
+
+void ObstacleDetectorNode::targetCallback(const std_msgs::msg::Float32MultiArray::SharedPtr msg)
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (msg->data.size() < 4) {
+    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+      "target_position 需要 [x_cm, y_cm, z_cm, yaw_deg]");
+    has_ground_target_ = false;
+    return;
+  }
+  if (msg->data[2] > 20.0F) {
+    has_ground_target_ = false;
+    return;
+  }
+  ground_target_ = {static_cast<double>(msg->data[0]) / 100.0,
+    static_cast<double>(msg->data[1]) / 100.0};
+  has_ground_target_ = true;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -192,30 +265,29 @@ std::vector<Pt2> ObstacleDetectorNode::collectRoiPoints(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 按相邻点距离断链，返回点数最多的一条链（墙是连续的）。
+// 按相邻点距离断链，保留所有候选墙体。
 // ─────────────────────────────────────────────────────────────────────────────
-std::vector<Pt2> ObstacleDetectorNode::longestChain(const std::vector<Pt2> & pts) const
+std::vector<std::vector<Pt2>> ObstacleDetectorNode::splitChains(const std::vector<Pt2> & pts) const
 {
-  std::vector<Pt2> best;
-  std::vector<Pt2> cur;
-  for (std::size_t i = 0; i < pts.size(); ++i) {
-    if (!cur.empty()) {
-      const double d = std::hypot(pts[i].x - cur.back().x, pts[i].y - cur.back().y);
-      if (d > chain_break_dist_m_) {
-        if (cur.size() > best.size()) { best = cur; }
-        cur.clear();
-      }
+  std::vector<std::vector<Pt2>> chains;
+  std::vector<Pt2> current;
+  for (const auto & point : pts) {
+    if (!current.empty() &&
+      std::hypot(point.x - current.back().x, point.y - current.back().y) > chain_break_dist_m_)
+    {
+      chains.push_back(std::move(current));
+      current.clear();
     }
-    cur.push_back(pts[i]);
+    current.push_back(point);
   }
-  if (cur.size() > best.size()) { best = cur; }
-  return best;
+  if (!current.empty()) { chains.push_back(std::move(current)); }
+  return chains;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Split-and-Merge：先 Douglas–Peucker 取顶点，再按转角合并近共线段。
 // ─────────────────────────────────────────────────────────────────────────────
-Polyline ObstacleDetectorNode::fitPolyline(const std::vector<Pt2> & chain, const Pt2 & car_xy) const
+Polyline ObstacleDetectorNode::fitPolyline(const std::vector<Pt2> & chain) const
 {
   Polyline out;
   const int n = static_cast<int>(chain.size());
@@ -260,25 +332,43 @@ Polyline ObstacleDetectorNode::fitPolyline(const std::vector<Pt2> & chain, const
   }
   if (total < min_total_length_m_) { return out; }
 
-  // ── 车到折线最近一段的垂直距离 ──
-  double perp = std::numeric_limits<double>::max();
-  for (std::size_t i = 1; i < verts.size(); ++i) {
-    perp = std::min(perp, pointToSegment(car_xy, verts[i - 1], verts[i]));
-  }
-
   out.valid = true;
   out.vertices = std::move(verts);
   out.total_length = total;
-  out.perp_dist = perp;
   return out;
+}
+
+bool ObstacleDetectorNode::pathDistanceToPolyline(
+  const Pt2 & car_xy, const Pt2 & target_xy, const Polyline & poly, double & path_dist) const
+{
+  const double route_length = std::hypot(target_xy.x - car_xy.x, target_xy.y - car_xy.y);
+  if (route_length < 1e-3) { return false; }
+
+  bool blocks_path = false;
+  double nearest_path_dist = std::numeric_limits<double>::max();
+  for (std::size_t i = 1; i < poly.vertices.size(); ++i) {
+    double corridor_dist = 0.0;
+    double route_t = 0.0;
+    if (!segmentPathDistance(
+        car_xy, target_xy, poly.vertices[i - 1], poly.vertices[i], corridor_dist, route_t))
+    {
+      continue;
+    }
+    if (corridor_dist <= path_corridor_half_width_m_ && route_t > 1e-3) {
+      blocks_path = true;
+      nearest_path_dist = std::min(nearest_path_dist, route_t * route_length);
+    }
+  }
+  if (blocks_path) { path_dist = nearest_path_dist; }
+  return blocks_path;
 }
 
 void ObstacleDetectorNode::publishObstacle(const Polyline & poly)
 {
   // 输出布局（map 系，单位 m）：
   //   [0] N 顶点数
-  //   [1 .. 2N]  顶点 x0,y0, x1,y1, ..., x(N-1),y(N-1)  （有序首尾相连）
-  //   [2N+1] perp_dist 车到折线最近段的垂直距离
+  //   [1 .. 2N] 顶点 x0,y0, x1,y1, ..., x(N-1),y(N-1)
+  //   [2N+1] path_dist 沿当前路线到阻挡墙的距离
   //   [2N+2] total_length 折线总长
   const int N = static_cast<int>(poly.vertices.size());
   std_msgs::msg::Float32MultiArray msg;
@@ -288,13 +378,13 @@ void ObstacleDetectorNode::publishObstacle(const Polyline & poly)
     msg.data.push_back(static_cast<float>(v.x));
     msg.data.push_back(static_cast<float>(v.y));
   }
-  msg.data.push_back(static_cast<float>(poly.perp_dist));
+  msg.data.push_back(static_cast<float>(poly.path_dist));
   msg.data.push_back(static_cast<float>(poly.total_length));
   obstacle_pub_->publish(msg);
 
   RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000,
-    "[折线墙] %d 顶点(%d 段) 总长%.2fm 垂距%.2fm  首(%.2f,%.2f) 尾(%.2f,%.2f)",
-    N, N - 1, poly.total_length, poly.perp_dist,
+    "[路线阻挡墙] %d 顶点(%d 段) 路线距离%.2fm 总长%.2fm 首(%.2f,%.2f) 尾(%.2f,%.2f)",
+    N, N - 1, poly.path_dist, poly.total_length,
     poly.vertices.front().x, poly.vertices.front().y,
     poly.vertices.back().x, poly.vertices.back().y);
 }
@@ -303,19 +393,41 @@ void ObstacleDetectorNode::scanCallback(const sensor_msgs::msg::LaserScan::Share
 {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!enabled_) { return; }
+  if (!has_ground_target_) {
+    RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
+      "等待当前地面航点 /target_position，不执行阻挡墙选择");
+    return;
+  }
 
   Pt2 car{0.0, 0.0};
   const auto pts = collectRoiPoints(*msg, car);
   if (pts.empty()) { return; }
 
-  const auto chain = longestChain(pts);
-  const Polyline poly = fitPolyline(chain, car);
-  if (!poly.valid) {
+  const auto chains = splitChains(pts);
+  Polyline selected;
+  double nearest_path_dist = std::numeric_limits<double>::max();
+  std::size_t valid_count = 0;
+  for (const auto & chain : chains) {
+    Polyline poly = fitPolyline(chain);
+    if (!poly.valid) { continue; }
+    ++valid_count;
+    double path_dist = 0.0;
+    if (pathDistanceToPolyline(car, ground_target_, poly, path_dist) &&
+      path_dist < nearest_path_dist)
+    {
+      nearest_path_dist = path_dist;
+      poly.path_dist = path_dist;
+      selected = std::move(poly);
+    }
+  }
+
+  if (!selected.valid) {
     RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
-      "ROI 内 %zu 点(最长链 %zu)，未拟合出有效折线墙", pts.size(), chain.size());
+      "ROI 内 %zu 点、%zu 条链、%zu 条有效墙，当前路线未被阻挡",
+      pts.size(), chains.size(), valid_count);
     return;
   }
-  publishObstacle(poly);
+  publishObstacle(selected);
 }
 
 }  // namespace obstacle_detector_pkg
