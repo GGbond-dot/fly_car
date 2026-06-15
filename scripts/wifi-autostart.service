@@ -1,0 +1,21 @@
+# 飞车(STA)Wi-Fi 自动择网 — systemd 自启动(不依赖桌面登录)。
+# 安装(按飞车板实际路径改 ExecStart / User):
+#   sudo cp wifi-autostart.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now wifi-autostart.service
+# 看日志: journalctl -u wifi-autostart -f   或  ~/wifi_logs/wifi_sta.log
+# 停: sudo systemctl stop wifi-autostart ; 禁用开机: sudo systemctl disable wifi-autostart
+[Unit]
+Description=kian_flycar Wi-Fi STA auto-select (fly_car)
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=simple
+User=orangepi
+ExecStart=/home/orangepi/kian_flycar/scripts/autostart_wifi.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

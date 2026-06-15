@@ -8,8 +8,8 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     return LaunchDescription([
-        DeclareLaunchArgument('target_ip', default_value='192.168.4.2',
-                              description='car 开发板的 IP'),
+        DeclareLaunchArgument('target_ip', default_value='192.168.10.161',
+                              description='car 在路由器网段的固定地址(飞车自身 192.168.10.171)'),
         DeclareLaunchArgument('target_port', default_value='8888'),
         Node(
             package='pose_sender_pkg',

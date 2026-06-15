@@ -44,7 +44,7 @@ public:
   PoseSender()
   : Node("pose_sender")
   {
-    declare_parameter<std::string>("target_ip", "192.168.4.2");  // 车的 IP,按组网实配!
+    declare_parameter<std::string>("target_ip", "192.168.10.161");  // 车在路由器网段的固定地址
     declare_parameter<int>("target_port", 8888);
     declare_parameter<double>("rate_hz", 20.0);
     declare_parameter<std::string>("map_frame", "map");

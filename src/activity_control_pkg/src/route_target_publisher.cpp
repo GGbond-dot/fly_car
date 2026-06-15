@@ -27,6 +27,9 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
   pos_tol_cm_ = declare_parameter("position_tolerance_cm", 9.0);
   yaw_tol_deg_ = declare_parameter("yaw_tolerance_deg", 5.0);
   height_tol_cm_ = declare_parameter("height_tolerance_cm", 12.0);
+  ground_z_tol_cm_ = declare_parameter("ground_z_tol_cm", 30.0);  // 地面:松(大)
+  air_z_tol_cm_ = declare_parameter("air_z_tol_cm", 8.0);         // 空中:紧(小)
+  land_z_cm_ = declare_parameter("land_z_cm", 4.0);              // land_after 落点高度
   map_frame_ = declare_parameter("map_frame", "map");
   laser_link_frame_ = declare_parameter("laser_link_frame", "laser_link");
   output_topic_ = declare_parameter("output_topic", "/target_position");
@@ -67,6 +70,42 @@ void RouteTargetPublisherNode::addTarget(const Target & target)
   }
 }
 
+void RouteTargetPublisherNode::insertNext(const std::vector<Target> & batch)
+{
+  if (batch.empty()) {
+    return;
+  }
+  std::lock_guard<std::mutex> lock(mutex_);
+
+  // 队列还没开始(无当前目标):退化为依次追加
+  if (current_idx_ == std::numeric_limits<std::size_t>::max() || targets_.empty()) {
+    const bool was_empty = targets_.empty();
+    targets_.insert(targets_.end(), batch.begin(), batch.end());
+    if (was_empty) {
+      current_idx_ = 0;
+      publishCurrent();
+    }
+    return;
+  }
+
+  // 所有目标已完成(current_idx_ 越界)时,从队尾接着追加并重启推进
+  if (current_idx_ >= targets_.size()) {
+    current_idx_ = targets_.size();
+    targets_.insert(targets_.end(), batch.begin(), batch.end());
+    publishCurrent();
+    return;
+  }
+
+  // 正常情况:在当前目标之前插入 batch。current_idx_ 数值不变,
+  // 但现在指向 batch 的第一个(起飞点);原当前目标顺延到 batch 之后。
+  targets_.insert(targets_.begin() + static_cast<std::ptrdiff_t>(current_idx_),
+    batch.begin(), batch.end());
+  RCLCPP_INFO(get_logger(),
+    "insertNext: 在 idx=%zu 前插入 %zu 个航点(越障序列),队列总数 %zu",
+    current_idx_, batch.size(), targets_.size());
+  publishCurrent();
+}
+
 std::size_t RouteTargetPublisherNode::currentIndex() const
 {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -79,10 +118,32 @@ std::size_t RouteTargetPublisherNode::size() const
   return targets_.size();
 }
 
+void RouteTargetPublisherNode::setFlightMode(bool active, double flight_z_cm)
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  flight_mode_ = active;
+  flight_z_cm_ = flight_z_cm;
+  RCLCPP_INFO(get_logger(),
+    "setFlightMode: %s (z 覆盖=%.0fcm) —— 后续航点沿原 xy 在空中飞",
+    active ? "ON" : "OFF", flight_z_cm_);
+  publishCurrent();  // 立即按新 z 重发当前目标,chassis_mux 据此切换
+}
+
+// 飞行模式下把 z 顶成 flight_z_cm,xy/yaw 不变;否则原样
+Target RouteTargetPublisherNode::effectiveTarget(const Target & t) const
+{
+  if (!flight_mode_) {
+    return t;
+  }
+  Target e = t;
+  e.z_cm = flight_z_cm_;
+  return e;
+}
+
 void RouteTargetPublisherNode::publishCurrent()
 {
   if (current_idx_ != std::numeric_limits<std::size_t>::max() && current_idx_ < targets_.size()) {
-    publishTarget(targets_[current_idx_], current_idx_ == 0);
+    publishTarget(effectiveTarget(targets_[current_idx_]), current_idx_ == 0);
   }
 }
 
@@ -150,23 +211,19 @@ bool RouteTargetPublisherNode::isReached(
   const double dz = target.z_cm - z_cm;
   const double dyaw = normalizeAngleDeg(target.yaw_deg - yaw_deg);
 
-  const double z_tol = ever_received_st_ready_ ? height_tol_cm_ : 20.0;
+  // 空中航点(z>20):z 容忍紧(高度必须到位);地面航点:z 容忍松(忽略地面噪声,
+  // 但松到的有限值仍能拦住“从空中降回地面前就误判到达”)。
+  const bool airborne = target.z_cm > 20.0;
+  const double z_tol = airborne ? air_z_tol_cm_ : ground_z_tol_cm_;
   const bool z_ok = (std::fabs(dz) <= z_tol);
   const bool xy_ok = (dxy <= pos_tol_cm_);
   const bool yaw_ok = (std::fabs(dyaw) <= yaw_tol_deg_);
 
-  // 如果目标Z值大于一个阈值（比如20cm），说明这是一个起飞或空中航点
-  // 这种情况下，我们放宽对XY和Yaw的要求，只要高度差不多就认为到达
-  if (target.z_cm > 20.0) {
-    // 对于起飞阶段，主要关心高度是否到达
-    if (current_idx_ == 0) {
-        return z_ok;
-    }
-    // 对于空中的航点，只要高度和水平位置都差不多就行，暂时忽略yaw
+  if (airborne) {
+    // 空中航点:高度到位 + xy 到位,放宽 yaw
     return z_ok && xy_ok;
   }
-
-  // 对于Z值很低（比如降落）或为0的航点，要求所有条件都满足
+  // 地面航点:xy + yaw + (松)z 都要满足
   return z_ok && xy_ok && yaw_ok;
 }
 
@@ -185,16 +242,29 @@ void RouteTargetPublisherNode::monitorTimerCallback()
     return;
   }
 
-  const Target & target = targets_[current_idx_];
+  const Target target = effectiveTarget(targets_[current_idx_]);
   RCLCPP_INFO_THROTTLE(
     this->get_logger(), *this->get_clock(), 5000,
     "当前目标 %zu: x=%.1f,y=%.1f,z=%.1f,yaw=%.1f",
     current_idx_, target.x_cm, target.y_cm, target.z_cm, target.yaw_deg
   );
   if (isReached(target, x_cm, y_cm, z_cm, yaw_deg)) {
+    const Target reached_orig = targets_[current_idx_];  // 原航点(含 land_after 标志与原 xy)
     RCLCPP_INFO(get_logger(),
       "目标 %zu 已完成，准备下一个", current_idx_);
     current_idx_++;
+
+    // 带 land_after 标志且当前在飞:到达后原地垂直下降回地面。
+    // 退出 z 覆盖(落点用真实低 z),插一个同 xy 的下降航点;已持锁,直接置 flight_mode_。
+    if (reached_orig.land_after && flight_mode_) {
+      flight_mode_ = false;
+      Target descent{reached_orig.x_cm, reached_orig.y_cm, land_z_cm_, reached_orig.yaw_deg, false};
+      targets_.insert(targets_.begin() + static_cast<std::ptrdiff_t>(current_idx_), descent);
+      RCLCPP_INFO(get_logger(),
+        "到达落点航点(%.1f,%.1f):退出飞行模式,插原地下降点 z=%.0fcm",
+        reached_orig.x_cm, reached_orig.y_cm, land_z_cm_);
+    }
+
     if (current_idx_ < targets_.size()) {
       publishCurrent();
     } else {

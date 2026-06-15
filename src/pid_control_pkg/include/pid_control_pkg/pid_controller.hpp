@@ -7,6 +7,7 @@
 
 #include <rclcpp/rclcpp.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
+#include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/float32_multi_array.hpp>
 #include <std_msgs/msg/int16.hpp>
 #include <tf2/LinearMath/Matrix3x3.h>
@@ -73,6 +74,7 @@ public:
 private:
   void targetPositionCallback(const std_msgs::msg::Float32MultiArray::SharedPtr msg);
   void heightCallback(const std_msgs::msg::Int16::SharedPtr msg);
+  void flightEnableCallback(const std_msgs::msg::Bool::SharedPtr msg);
   void controlTimerCallback();
 
   bool getCurrentPose();
@@ -89,6 +91,7 @@ private:
   // ROS interfaces
   rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr target_position_sub_;
   rclcpp::Subscription<std_msgs::msg::Int16>::SharedPtr height_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr flight_enable_sub_;
   rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr target_velocity_pub_;
   rclcpp::TimerBase::SharedPtr control_timer_;
 
@@ -110,6 +113,7 @@ private:
   double target_yaw_deg_;
   bool has_target_position_;
   bool has_target_height_;
+  bool flight_enabled_;  // chassis_mux 的 /flight_enable 门;false 时不发速度(地面态由差速底盘接管)
 
   // Current state
   double current_x_cm_;

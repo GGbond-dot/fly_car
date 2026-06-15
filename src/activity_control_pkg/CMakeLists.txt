@@ -42,6 +42,22 @@ add_executable(route_test_node src/route_test_node.cpp)
 target_link_libraries(route_test_node route_target_publisher)
 ament_target_dependencies(route_test_node rclcpp)
 
+# 平地遍历 + 遇障起飞 任务编排(覆盖生成器 + 障碍决策 + 航点队列同进程)
+add_executable(coverage_mission_node
+  src/coverage_mission_main.cpp
+  src/coverage_generator.cpp
+  src/obstacle_decision.cpp
+)
+target_link_libraries(coverage_mission_node route_target_publisher)
+ament_target_dependencies(coverage_mission_node
+  rclcpp
+  std_msgs
+  geometry_msgs
+  tf2
+  tf2_ros
+  tf2_geometry_msgs
+)
+
 install(TARGETS route_target_publisher
   EXPORT export_route_target_publisher
   ARCHIVE DESTINATION lib
@@ -52,6 +68,7 @@ install(TARGETS route_target_publisher
 install(TARGETS
   route_target_publisher_node
   route_test_node
+  coverage_mission_node
   DESTINATION lib/${PROJECT_NAME}
 )
 

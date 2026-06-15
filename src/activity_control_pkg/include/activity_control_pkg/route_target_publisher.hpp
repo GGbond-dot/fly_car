@@ -20,6 +20,7 @@ struct Target
   double y_cm;
   double z_cm;
   double yaw_deg;
+  bool land_after = false;  // 标志位:飞到此航点后原地垂直下降回地面(用户在落点航点上打)
 };
 
 class RouteTargetPublisherNode : public rclcpp::Node
@@ -29,6 +30,14 @@ public:
 
   void addTarget(const Target & target);
 
+  // 在“当前正在追的航点”之前原子插入一串航点(障碍决策插“原地起飞点”用)。
+  // 当前目标被往后顶,先飞越再继续原目标;队列尚未开始时等同依次 addTarget。
+  void insertNext(const std::vector<Target> & batch);
+
+  // 全局 z 覆盖(飞行模式):active 时发布/到达判定都把 z 顶成 flight_z_cm,
+  // xy/yaw 仍用原航点 —— 即“沿原来的 xy 在空中飞”。关掉则恢复各航点自身 z。
+  void setFlightMode(bool active, double flight_z_cm = 100.0);
+
   std::size_t currentIndex() const;
 
   std::size_t size() const;
@@ -36,6 +45,7 @@ public:
 private:
   void publishCurrent();
   void publishTarget(const Target & target, bool init_flag);
+  Target effectiveTarget(const Target & t) const;  // 应用飞行模式 z 覆盖
 
   bool getCurrentPose(double & x_cm, double & y_cm, double & z_cm, double & yaw_deg);
   bool isReached(const Target & target, double x_cm, double y_cm, double z_cm, double yaw_deg) const;
@@ -60,12 +70,18 @@ private:
   std::vector<Target> targets_;
   std::size_t current_idx_;
 
+  bool flight_mode_ = false;     // 全局 z 覆盖开关
+  double flight_z_cm_ = 100.0;   // 覆盖高度
+
   bool has_height_;
   double current_height_cm_;
 
   double pos_tol_cm_;
   double yaw_tol_deg_;
   double height_tol_cm_;
+  double ground_z_tol_cm_;  // 地面航点 z 容忍(松):忽略地面噪声,但仍能拦住“还没真正降到地面”
+  double air_z_tol_cm_;     // 空中航点 z 容忍(紧):高度要到位
+  double land_z_cm_;        // land_after 落点的地面高度
 
   std::string map_frame_;
   std::string laser_link_frame_;

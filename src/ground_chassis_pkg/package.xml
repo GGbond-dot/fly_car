@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypelang="RNG schematron"?>
+<package format="3">
+  <name>ground_chassis_pkg</name>
+  <version>0.0.1</version>
+  <description>飞车地面差速底盘控制:diff_drive_controller + chassis_mux(地空互斥仲裁) + chassis_bridge($VW 串口桥)</description>
+  <maintainer email="AngelBabydoi@computer4u.com">kian</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2_geometry_msgs</depend>
+
+  <!-- chassis_bridge.py 运行时依赖 -->
+  <exec_depend>rclpy</exec_depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

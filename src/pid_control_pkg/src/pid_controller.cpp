@@ -454,6 +454,7 @@ PositionPIDController::PositionPIDController()
   target_yaw_deg_(0.0),
   has_target_position_(false),
   has_target_height_(false),
+  flight_enabled_(true),
   current_x_cm_(0.0),
   current_y_cm_(0.0),
   current_yaw_deg_(0.0),
@@ -493,6 +494,13 @@ PositionPIDController::PositionPIDController()
     "/height", rclcpp::QoS(10),
     std::bind(&PositionPIDController::heightCallback, this, std::placeholders::_1));
 
+  // 地空互斥门:chassis_mux 按目标 z 仲裁。false 时本节点不发 /target_velocity(地面态由差速底盘接管)。
+  // latched(transient_local)以拿到 mux 当前态;默认 true 兼容无 mux 的纯飞行调试。
+  flight_enabled_ = declare_parameter<bool>("flight_enable_default", true);
+  flight_enable_sub_ = create_subscription<std_msgs::msg::Bool>(
+    "/flight_enable", rclcpp::QoS(rclcpp::KeepLast(1)).transient_local().reliable(),
+    std::bind(&PositionPIDController::flightEnableCallback, this, std::placeholders::_1));
+
   target_velocity_pub_ = create_publisher<std_msgs::msg::Float32MultiArray>(
     "/target_velocity", rclcpp::QoS(10));
 
@@ -527,6 +535,25 @@ void PositionPIDController::heightCallback(const std_msgs::msg::Int16::SharedPtr
 {
   current_z_cm_ = static_cast<double>(msg->data);
   has_target_height_ = true;
+}
+
+void PositionPIDController::flightEnableCallback(const std_msgs::msg::Bool::SharedPtr msg)
+{
+  if (msg->data == flight_enabled_) {
+    return;
+  }
+  flight_enabled_ = msg->data;
+  if (!flight_enabled_) {
+    // 切到地面态:清积分,避免重新使能时旧积分突跳
+    pid_x_.reset();
+    pid_y_.reset();
+    pid_yaw_.reset();
+    pid_z_.reset();
+    pid_xy_speed_.reset();
+    RCLCPP_INFO(get_logger(), "/flight_enable=false:飞控 PID 停发速度(地面态由差速底盘接管)");
+  } else {
+    RCLCPP_INFO(get_logger(), "/flight_enable=true:飞控 PID 接管");
+  }
 }
 /*
     获取自动获取tf数据
@@ -691,6 +718,11 @@ std_msgs::msg::Float32MultiArray PositionPIDController::processPID(double dt)
 
 void PositionPIDController::controlTimerCallback()
 {
+  // 地空互斥:被 chassis_mux 置为地面态时,飞控 PID 不发任何速度(车跑时飞控绝不运行)
+  if (!flight_enabled_) {
+    return;
+  }
+
   if (!has_target_position_) {
     return;
   }
