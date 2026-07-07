@@ -94,6 +94,13 @@ public:
     declare_parameter<double>("lookahead_dist_cm", 30.0);
     // 线速度最小地板(直行/直通时,v>0 但低于此值则提到此值),防轮子掉进起步死区卡顿(0=关)。
     declare_parameter<double>("v_min_mps", 0.0);
+    // v_min 地板的方位门:仅 |e_h| 小于此角(大致直行)才兜底 v_min;急拐(e_h 大)放开地板,
+    // 让 v 落到 v_max·cos(e_h),车更接近原地拧 → 转弯半径 R=v/w 变小,角点外扩收窄。
+    // 角点转弯是外轮承速、内轮近零,松地板不会让直行那种"两轮同慢"卡死区。大→接近旧行为;小→拐弯更急。
+    declare_parameter<double>("v_floor_gate_deg", 90.0);  // 默认 90≈全程兜底(旧行为);上板从 35 起调
+    // 转向前馈:补偿左右轮恒定速度差(实测左轮偏快→车向右偏→各直边都得持续+w 左打)。开环量 yaw 漂移率
+    // 定值,直接加到驱动段(pp/chase)的 w 上。默认 0=不补;左轮快取正(往左修)。只治直行稳态漂,不治 carto yaw 漂。
+    declare_parameter<double>("w_bias_rps", 0.0);
     // 调参用:非空则把每拍内部状态落 CSV(默认空=关);跑完 scp 文件回来分析
     declare_parameter<std::string>("log_csv_path", "");
     declare_parameter<double>("align_gate_deg", 45.0);  // 方位误差超过此值先原地转向
@@ -121,6 +128,8 @@ public:
     w_min_ = get_parameter("w_min_rps").as_double();
     lookahead_m_ = get_parameter("lookahead_dist_cm").as_double() / 100.0;
     v_min_ = get_parameter("v_min_mps").as_double();
+    v_floor_gate_rad_ = get_parameter("v_floor_gate_deg").as_double() * M_PI / 180.0;
+    w_bias_ = get_parameter("w_bias_rps").as_double();
     align_gate_rad_ = get_parameter("align_gate_deg").as_double() * M_PI / 180.0;
     pos_tol_m_ = get_parameter("pos_tol_cm").as_double() / 100.0;
     yaw_tol_rad_ = get_parameter("yaw_tol_deg").as_double() * M_PI / 180.0;
@@ -199,6 +208,8 @@ public:
       else if (n == "w_min_rps") w_min_ = p.as_double();
       else if (n == "lookahead_dist_cm") lookahead_m_ = p.as_double() / 100.0;
       else if (n == "v_min_mps") v_min_ = p.as_double();
+      else if (n == "v_floor_gate_deg") v_floor_gate_rad_ = p.as_double() * M_PI / 180.0;
+      else if (n == "w_bias_rps") w_bias_ = p.as_double();
       else if (n == "align_gate_deg") align_gate_rad_ = p.as_double() * M_PI / 180.0;
       else if (n == "pos_tol_cm") pos_tol_m_ = p.as_double() / 100.0;
       else if (n == "yaw_tol_deg") yaw_tol_rad_ = p.as_double() * M_PI / 180.0;
@@ -343,10 +354,15 @@ private:
       const P2 L = lookaheadPoint({x, y}, chain, lookahead_m_);
       const double e_h = normalizeAngle(std::atan2(L.y - y, L.x - x) - yaw);
       log_e = e_h;
+      // 注意:pp 段不能对 e_h 做积分。e_h 是"追前视点的追踪角",不是该归零的航向误差——
+      // 进弯段 e_h 单调爬同号会把积分往转弯方向灌到饱和(实测 windup 到 0.3、e_h 冲 133°、路径拧变形)。
+      // 直行段的稳态外凸另议(需 cross-track 积分或轮速前馈,不是这里)。
       iw_integral_ = 0.0;
-      w = clamp(kp_w_ * e_h - kd_w_ * yaw_rate_filt_, -w_max_, w_max_);
+      w = clamp(kp_w_ * e_h - kd_w_ * yaw_rate_filt_ + w_bias_, -w_max_, w_max_);
       v = clamp(v_max_ * std::cos(e_h), 0.0, v_max_);          // 巡航,拐急(e_h 大)才降速
-      if (v > 1e-3 && v_min_ > 1e-9 && v < v_min_) v = v_min_;  // 防轮子掉进起步死区卡顿
+      // v_min 地板只在大致直行(|e_h|<门)时兜底防死区;急拐放开,让 v 贴 cos 降速原地拧 → 角点半径变小不外扩
+      if (v > 1e-3 && v_min_ > 1e-9 && v < v_min_ &&
+          std::fabs(e_h) < v_floor_gate_rad_) v = v_min_;
     } else if (d > pos_tol_m_) {
       // ===== 末航点趋近:沿用 carrot(align_gate 门 + 直行积分 + 按 d 降速到停) =====
       phase = "chase";
@@ -363,7 +379,7 @@ private:
           v = clamp(kp_v_ * d, 0.0, v_max_) * std::cos(e_h);
         }
       }
-      w = clamp(kp_w_ * e_h + i_term - kd_w_ * yaw_rate_filt_, -w_max_, w_max_);
+      w = clamp(kp_w_ * e_h + i_term - kd_w_ * yaw_rate_filt_ + w_bias_, -w_max_, w_max_);
       if (v > 1e-3 && v_min_ > 1e-9 && v < v_min_) v = v_min_;
     } else {
       // ===== 末航点到位:原地对准目标 yaw(带 w_min 破死区,kd 先减后兜底见注) =====
@@ -414,7 +430,7 @@ private:
   double kp_v_, v_max_, kp_w_, w_max_;
   double ki_w_{0.0}, iw_limit_{0.3}, control_dt_{0.05};
   double kd_w_{0.0}, yaw_rate_alpha_{0.5}, w_slew_{0.0}, w_min_{0.0};
-  double lookahead_m_{0.3}, v_min_{0.0};
+  double lookahead_m_{0.3}, v_min_{0.0}, v_floor_gate_rad_{M_PI}, w_bias_{0.0};
   std::vector<P2> next_pts_;   // pure-pursuit 前视航点(map, m),route 追加而来
   double align_gate_rad_, pos_tol_m_, yaw_tol_rad_;
   double target_timeout_s_, stop_burst_s_;
