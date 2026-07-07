@@ -43,8 +43,8 @@ public:
   std::size_t size() const;
 
 private:
-  void publishCurrent();
-  void publishTarget(const Target & target, bool init_flag);
+  void publishCurrent(bool verbose = true);  // verbose=false:心跳静默重发,不打日志
+  void publishTarget(const Target & target, bool init_flag, bool verbose);
   Target effectiveTarget(const Target & t) const;  // 应用飞行模式 z 覆盖
 
   bool getCurrentPose(double & x_cm, double & y_cm, double & z_cm, double & yaw_deg);
@@ -69,6 +69,7 @@ private:
   mutable std::mutex mutex_;
   std::vector<Target> targets_;
   std::size_t current_idx_;
+  std::size_t lookahead_count_{0};  // /target_position 后追加的前视航点数(0=不追加)
 
   bool flight_mode_ = false;     // 全局 z 覆盖开关
   double flight_z_cm_ = 100.0;   // 覆盖高度
@@ -97,13 +98,7 @@ public:
     const rclcpp::NodeOptions & options = rclcpp::NodeOptions());
 
 private:
-  void addTimerCallback();
-
   std::shared_ptr<RouteTargetPublisherNode> route_node_;
-  rclcpp::TimerBase::SharedPtr add_timer_;
-
-  bool started_;
-  int next_target_index_;
 };
 
 }  // namespace activity_control_pkg

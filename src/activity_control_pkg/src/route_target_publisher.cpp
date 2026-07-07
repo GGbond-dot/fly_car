@@ -33,6 +33,9 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
   map_frame_ = declare_parameter("map_frame", "map");
   laser_link_frame_ = declare_parameter("laser_link_frame", "laser_link");
   output_topic_ = declare_parameter("output_topic", "/target_position");
+  // pure-pursuit 前视:>0 时在 /target_position 消息后追加接下来 N 个航点的 xy(cm),供控制器取前视点。
+  // 默认 0=不追加,消息仍是 [x,y,z,yaw] 4 位,老订阅者(chassis_mux 等)完全兼容。
+  lookahead_count_ = static_cast<std::size_t>(declare_parameter("lookahead_count", 0));
 
   tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
   tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
@@ -140,14 +143,14 @@ Target RouteTargetPublisherNode::effectiveTarget(const Target & t) const
   return e;
 }
 
-void RouteTargetPublisherNode::publishCurrent()
+void RouteTargetPublisherNode::publishCurrent(bool verbose)
 {
   if (current_idx_ != std::numeric_limits<std::size_t>::max() && current_idx_ < targets_.size()) {
-    publishTarget(effectiveTarget(targets_[current_idx_]), current_idx_ == 0);
+    publishTarget(effectiveTarget(targets_[current_idx_]), current_idx_ == 0, verbose);
   }
 }
 
-void RouteTargetPublisherNode::publishTarget(const Target & target, bool init_flag)
+void RouteTargetPublisherNode::publishTarget(const Target & target, bool init_flag, bool verbose)
 {
   std_msgs::msg::Float32MultiArray message;
   message.data.resize(4);
@@ -155,11 +158,20 @@ void RouteTargetPublisherNode::publishTarget(const Target & target, bool init_fl
   message.data[1] = static_cast<float>(target.y_cm);
   message.data[2] = static_cast<float>(target.z_cm);
   message.data[3] = static_cast<float>(target.yaw_deg);
+  // 追加前视航点 xy(cm):当前点之后的 lookahead_count_ 个。控制器据此取前方前视点、自动圆角。
+  for (std::size_t k = 1; k <= lookahead_count_ &&
+       current_idx_ != std::numeric_limits<std::size_t>::max() &&
+       current_idx_ + k < targets_.size(); ++k) {
+    message.data.push_back(static_cast<float>(targets_[current_idx_ + k].x_cm));
+    message.data.push_back(static_cast<float>(targets_[current_idx_ + k].y_cm));
+  }
   target_pub_->publish(message);
-  RCLCPP_INFO(get_logger(),
-    "发布目标: x=%.1fcm y=%.1fcm z=%.1fcm yaw=%.1fdeg%s",
-    target.x_cm, target.y_cm, target.z_cm, target.yaw_deg,
-    init_flag ? " (首个)" : "");
+  if (verbose) {
+    RCLCPP_INFO(get_logger(),
+      "发布目标: x=%.1fcm y=%.1fcm z=%.1fcm yaw=%.1fdeg%s",
+      target.x_cm, target.y_cm, target.z_cm, target.yaw_deg,
+      init_flag ? " (首个)" : "");
+  }
 }
 
 void RouteTargetPublisherNode::heightCallback(const std_msgs::msg::Int16::SharedPtr msg)
@@ -234,6 +246,12 @@ void RouteTargetPublisherNode::monitorTimerCallback()
     return;
   }
 
+  // 心跳:每个 tick 重发当前目标(静默,不打日志)。/target_position 虽是锁存单发,
+  // 但下游 diff_drive_controller 有 target_timeout_s 安全超时——没有持续心跳它会在 ~2s 后
+  // 判目标过期并永久沉默(车停死)。周期重发让它一直追,同时保留"发布器一挂心跳停、
+  // 控制器安全停车"的语义。
+  publishCurrent(/*verbose=*/false);
+
   double x_cm = 0.0;
   double y_cm = 0.0;
   double z_cm = 0.0;
@@ -295,69 +313,37 @@ RouteTestNode::RouteTestNode(
   const std::shared_ptr<RouteTargetPublisherNode> & route_node,
   const rclcpp::NodeOptions & options)
 : rclcpp::Node("route_test_node", options),
-  route_node_(route_node),
-  started_(false),
-  next_target_index_(1)
+  route_node_(route_node)
 {
   std::setlocale(LC_ALL, "");
 
-  add_timer_ = create_wall_timer(
-    std::chrono::seconds(1),
-    std::bind(&RouteTestNode::addTimerCallback, this));
-  add_timer_->cancel();
+  // 航点走参数,便于 launch 配置不同测试(跑方形/飞方形)而不必改代码重编。
+  // 扁平数组每 4 个一组 [x_cm, y_cm, z_cm, yaw_deg],与 /target_position 布局一致。
+  // 默认沿用原演示序列(先前进 2m,升到 100cm 飞方形,再降落),保证 demo1 行为不变。
+  const std::vector<double> default_wp{
+    200.0, 0.0, 4.0, 0.0,
+    200.0, 0.0, 100.0, 0.0,
+    200.0, 200.0, 100.0, 0.0,
+    0.0, 200.0, 100.0, 0.0,
+    0.0, 200.0, 0.0, 0.0};
+  const auto flat = declare_parameter<std::vector<double>>("waypoints", default_wp);
 
-  RCLCPP_INFO(get_logger(), "Route test node 启动，自动添加首个目标。");
-
-  Target first{200.0, 0.0, 4.0, 0.0};
-  route_node_->addTarget(first);
-
-  const auto current = route_node_->currentIndex();
-  RCLCPP_INFO(get_logger(),
-    "添加首个目标: x=%.1f y=%.1f z=%.1f yaw=%.1f | 当前第 %zu 个目标",
-    first.x_cm, first.y_cm, first.z_cm, first.yaw_deg,
-    (current == std::numeric_limits<std::size_t>::max() ? 0 : current + 1));
-
-  add_timer_->reset();
-  started_ = true;
-}
-
-
-
-
-void RouteTestNode::addTimerCallback()
-{
-  if (!started_) {
-    return;
+  if (flat.size() < 4 || flat.size() % 4 != 0) {
+    RCLCPP_FATAL(get_logger(),
+      "waypoints 必须是 4 的倍数 [x_cm,y_cm,z_cm,yaw_deg,...],当前 %zu 个数", flat.size());
+    throw std::runtime_error("invalid waypoints parameter");
   }
 
-  Target target{};
-  switch (next_target_index_) {
-    case 1:
-      target = Target{200.0, 0.0, 100.0, 0.0};
-      break;
-    case 2:
-      target = Target{200.0, 200.0, 100.0, 0.0};
-      break;
-    case 3:
-      target = Target{0.0, 200.0, 100.0, 0.0};
-      break;
-    case 4:
-      target  = Target{0.0, 200.0, 0.0, 0.0};
-      break;
-    default:
-      add_timer_->cancel();
-      RCLCPP_INFO(get_logger(), "预设目标全部添加完毕");
-      return;
+  // 一次性把全部航点压入队列;RouteTargetPublisher 按到达自动推进。
+  for (std::size_t i = 0; i + 3 < flat.size(); i += 4) {
+    const Target t{flat[i], flat[i + 1], flat[i + 2], flat[i + 3]};
+    route_node_->addTarget(t);
+    RCLCPP_INFO(get_logger(),
+      "添加航点 %zu: x=%.1f y=%.1f z=%.1f yaw=%.1f",
+      i / 4, t.x_cm, t.y_cm, t.z_cm, t.yaw_deg);
   }
 
-  route_node_->addTarget(target);
-  const auto current = route_node_->currentIndex();
-  RCLCPP_INFO(get_logger(),
-    "追加目标 idx=%d: x=%.1f y=%.1f z=%.1f yaw=%.1f | 当前第 %zu 个目标",
-    next_target_index_, target.x_cm, target.y_cm, target.z_cm, target.yaw_deg,
-    (current == std::numeric_limits<std::size_t>::max() ? 0 : current + 1));
-
-  ++next_target_index_;
+  RCLCPP_INFO(get_logger(), "Route test node 启动,共加载 %zu 个航点。", flat.size() / 4);
 }
 
 }  // namespace activity_control_pkg

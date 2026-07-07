@@ -2,12 +2,14 @@
 
 > 状态:代码完成(2026-06-14),待上板 `colcon build` + 实测调参。
 > 本文是飞车"陆地差速行驶 ↔ 空中飞越"两套控制链如何**互斥切换**的设计,与[任务架构](coverage_flyover_mission_design.md)配套。
+>
+> 📌 **地面"跑得稳"的调试/调参(跑偏、超调、静摩擦、前馈、限速、CSV 日志)看** → [地面底盘控制调参 & 调试记录](ground_chassis_tuning.md)。本篇只讲地空互斥。
 
 ---
 
 ## 一、为什么需要这套
 
-飞车是陆空两用:**地面行驶有独立的轮式底盘**(和地面车 `car` 同款 **SR5E1E3 差速板**,`/dev/ttyS6` @115200,`$VW` 文本帧),空中才用原有 STM32 全向飞控(`pid_control_pkg → uart_to_stm32`,`/dev/ttyUSB0` 二进制帧)。地面不是靠飞控贴地飞。
+飞车是陆空两用:**地面行驶有独立的轮式底盘**(和地面车 `car` 同款 **SR5E1E3 差速板**,飞车接 `/dev/ttyS3` @115200,`$VW` 文本帧),空中才用原有 STM32 全向飞控(`pid_control_pkg → uart_to_stm32`,`/dev/ttyUSB0` 二进制帧)。地面不是靠飞控贴地飞。
 
 **硬要求:两套控制链严格互斥** —— 车跑时飞控 PID 绝不能运行,飞控起飞时轮子绝不能转。否则会出现"飞控在地面乱发速度""轮子在空中空转"等危险情况。
 
@@ -24,6 +26,10 @@
 | `chassis_mux` | **地空互斥的唯一裁判**。按目标 z 与实测 `/height` 仲裁,latched 发布互斥的 `/ground_enable` 与 `/flight_enable`。 |
 
 对 `pid_control_pkg` 的唯一改动:新增订阅 `/flight_enable`(标志位),`false` 时 `controlTimerCallback` 直接 return 且 reset 积分;默认 `true` 兼容无 mux 的纯飞行调试。
+
+> **底盘 `$VW` 是裸速度指令、不碰底盘 IMU**(固件 `protocol_handle_vw → chassis_set_target_vw`,按 `wheel_base` 几何算左右轮)。固件另有 `$TURN`/`$LINE` 用 IMU 闭环,但 IMU yaw 是**纯陀螺积分会漂**,有激光雷达就**弃用**,直接用 `map←laser_link` 的雷达 yaw 闭环、`$VW` 当执行末端。固件源码解压在仓库根 `ZFEVB_SR5E1E3_Fly_Car/`。详见车端记录与项目记忆 `car-vw-lidar-yaw-no-imu`。
+>
+> **控制点偏移(前驱+后万向轮几何)**:`$VW` 的 v/w 定义在**前驱动轮轴中点**,而雷达不在那。`diff_drive_controller` 加了 `ctrl_offset_x_cm/y_cm`,把控制点沿车体平移到前轴中点 = 旋转中心,转弯走弧不抖、不必原地转。**飞车实测:轴在雷达前方 10.5cm、横向 0**(值在 `ground_chassis.launch.py`);车端对应值 6.2cm。
 
 ```
                               ┌─ /ground_enable → diff_drive_controller → /cmd_vel → chassis_bridge($VW) → SR5E1E3 地面板
@@ -119,7 +125,7 @@ mux:目标z>20 →【停 settle 秒】→ flight_enable=true → 原地垂直起
 | `ground_z_tol_cm` / `air_z_tol_cm` | 30 / 8 | RouteTargetPublisher | 地面松 / 空中紧 z 容忍 |
 | `land_z_cm` | 4 | RouteTargetPublisher | land_after 落点高度 |
 | `land_after_indices` | [] | coverage_generator | 哪些航点打落地标志 |
-| 底盘串口 | `/dev/ttyS6` @115200 | chassis_bridge | 与 car 同款 SR5E1E3 |
+| 底盘串口 | `/dev/ttyS3` @115200 | chassis_bridge | 与 car 同款 SR5E1E3(飞车接 ttyS3,非车的 ttyS6) |
 
 > 场地边界/行距、PID 增益、上述高度阈值均为占位/待实测标定。按双设备工作流,本地不编译,上板验证。
 

@@ -1,0 +1,9 @@
+# 圆角方形专用:放宽 route_target_publisher 的 yaw 推进门控。
+# 默认它要 xy+yaw 都到位才推进下一航点;圆角走弧时车的机头在持续转,
+# 若卡 yaw(5°)会退化成原地小转。这里把 yaw 容忍放到 180°,等于"到 xy 就推进",
+# 让车沿弧线连续通过各航点、不在拐角原地转(publisher pos_tol 15cm > 底盘 5cm,
+# 目标会在底盘进入原地对准前先推进,保持前进)。
+# /** 作用于进程内所有节点;route_test_node 未声明此参数会被忽略,无副作用。
+/**:
+  ros__parameters:
+    yaw_tolerance_deg: 180.0

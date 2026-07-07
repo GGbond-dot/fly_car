@@ -18,7 +18,7 @@
   - `src/pid_control_pkg/` — 位置 PID，map 系误差→速度，发 `/target_velocity`
   - `src/uart_to_stm32/` — ROS↔STM32 串口桥，下发飞控前做 map→body 旋转
   - `src/my_carto_pkg/` — Cartographer 建图/定位（提供 `map<-laser_link` TF）
-  - `src/ground_chassis_pkg/` — **飞车地面差速底盘**(本项目新增,✅代码):`diff_drive_controller`(/target_position+/ground_enable→/cmd_vel) + `chassis_bridge.py`($VW 串口桥,/dev/ttyS6@115200,同 car 的 SR5E1E3) + `chassis_mux`(地空互斥仲裁,按目标 z 与实测 /height 发 /ground_enable、/flight_enable)。地面行驶用它,空中才用飞控链,两者严格互斥。详见[地面底盘与飞越](ground_chassis_and_flyover.md)
+  - `src/ground_chassis_pkg/` — **飞车地面差速底盘**(本项目新增,✅代码):`diff_drive_controller`(/target_position+/ground_enable→/cmd_vel,航向环 P**I**) + `chassis_bridge.py`($VW 串口桥,**/dev/ttyS3**@115200,同 car 的 SR5E1E3) + `chassis_mux`(地空互斥仲裁,按目标 z 与实测 /height 发 /ground_enable、/flight_enable)。地面行驶用它,空中才用飞控链,两者严格互斥。地空切换见[地面底盘与飞越](ground_chassis_and_flyover.md);**跑动稳定性调参(静摩擦/前馈/超调/CSV日志)见[控制调参&调试](ground_chassis_tuning.md)**
   - `src/my_launch/` — 总启动入口
   - `src/serial_comm/` — 串口协议库
   - `src/bluesea2/` — 蓝海激光雷达驱动
@@ -71,6 +71,7 @@
 ### 架构 / 任务设计
 - [平地遍历 + 遇障起飞 任务架构](coverage_flyover_mission_design.md) — 整体架构、为何不用规划器(EGO/Nav2)、复用现有航点机制、待实现节点与待定参数。**后续开发主线，先读这篇。**
 - [飞车地面底盘 + 起飞/飞越/落地](ground_chassis_and_flyover.md) — 陆地差速底盘与空中飞控**两套控制链如何互斥切换**:chassis_mux 仲裁(目标z起飞、实测/height降落、2s缓冲)、原地垂直起飞、全局z覆盖、land_after落地标志、isReached容忍度方向。**地空切换的实现细节看这篇。**
+- [飞车地面底盘 控制调参 & 调试记录](ground_chassis_tuning.md) — "跑动不稳定"的**根因坐实 + 修法 + 调参手册**:静摩擦→固件速度环积分饱和释放暴冲(实测超调70°);固件加静摩擦前馈/条件积分抗饱和/加速度限幅($SET,FF/$SET,ACCEL,烧一次后全串口在线调)、ROS 航向环 P→PI、CSV 日志与 send_log.sh 回传、几何标定、待优化项(align_gate爬行/pure-pursuit)。**跑得稳看这篇。**
 
 ### 功能包说明
 - [obstacle_detector_pkg 折线障碍检测](obstacle_detector_pkg.md) — 激光+TF 的折线墙检测(Split-and-Merge)，话题/数据布局/参数/用法。
@@ -94,4 +95,5 @@
 | 覆盖生成器(弓字形航点) | 🔶 代码完成(2026-06-14,`coverage_generator`);场地边界/行距占位待标定 |
 | 障碍决策(墙逼近→原地起飞+飞行模式) | 🔶 代码完成(2026-06-14,`obstacle_decision`,简化为 path_dist≤0.6 触发→插原地起飞点+`setFlightMode`);待上板实测 |
 | 飞车地面差速底盘 + 地空互斥切换 | 🔶 代码完成(2026-06-14,`ground_chassis_pkg`:diff_drive_controller/chassis_bridge/chassis_mux + pid 加 /flight_enable 标志位);串口/高度阈值/PID 待上板实测。详见[地面底盘与飞越](ground_chassis_and_flyover.md) |
+| 地面跑动稳定性(跑偏/超调) | 🔶 根因坐实(2026-07-07,静摩擦→固件速度环积分饱和暴冲);固件加前馈/抗饱和/加速度限幅 + ROS 航向 PI 已写入代码,**待烧录/编译实测调参**。详见[控制调参&调试](ground_chassis_tuning.md) |
 | 落地(land_after 标志 → 原地垂直下降) | 🔶 代码完成(2026-06-14);落地判据依赖飞控回传 /height |

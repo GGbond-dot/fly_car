@@ -32,7 +32,7 @@ except ImportError:
     raise
 
 
-DEFAULT_PORT = "/dev/ttyS6"   # 与 car 同款 SR5E1E3 板
+DEFAULT_PORT = "/dev/ttyS3"   # 飞车地面底盘 SR5E1E3 板(与 car 同款,但飞车接在 ttyS3)
 DEFAULT_BAUD = 115200
 CMD_VEL_TOPIC = "cmd_vel"
 
@@ -108,6 +108,53 @@ def make_vw_frame(v, w):
     return f"$VW,{format_float(v)},{format_float(w)}\r\n"
 
 
+def decode_response(response):
+    return response.decode("ascii", errors="replace").rstrip()
+
+
+def classify_response(response):
+    """按 SR5E1E3 协议粗分驱动板回复:无回复/报错/确认/仅有数据。"""
+    if not response:
+        return "NO_RESPONSE"
+    text = decode_response(response)
+    if "$ERR," in text:
+        return "ERR"
+    if "$OK," in text:
+        return "OK"
+    return "RX_ONLY"
+
+
+class CommandResult:
+    """一条串口命令的返回结果,供进 VW 模式等握手判断是否成功。"""
+
+    def __init__(self, command, response):
+        self.command = command
+        self.response = response
+        self.text = decode_response(response) if response else ""
+        self.status = classify_response(response)
+
+    @property
+    def can_continue(self):
+        # 只有明确 NO_RESPONSE / ERR 才算失败;RX_ONLY / OK 都放行
+        return self.status not in ("NO_RESPONSE", "ERR")
+
+
+def send_command(fd, command, read_timeout_s=READ_TIMEOUT_S, logger=None):
+    """发一帧已带 CRLF 的命令并读驱动板回复(慢通道,握手用)。"""
+    if logger is not None:
+        logger.info(f"TX: {command.rstrip()!r}")
+    os.write(fd, command.encode("ascii"))
+    termios.tcdrain(fd)
+    response = read_available(fd, read_timeout_s)
+    result = CommandResult(command, response)
+    if logger is not None:
+        if response:
+            logger.info(f"RX: {decode_response(response)!r} [{result.status}]")
+        else:
+            logger.info(f"RX: <no response> [{result.status}]")
+    return result
+
+
 class ChassisBridgeNode(Node):
     def __init__(self, port, baud, chassis_timeout_ms=0):
         super().__init__("chassis_bridge")
@@ -127,7 +174,7 @@ class ChassisBridgeNode(Node):
 
         if chassis_timeout_ms > 0:
             # 底盘侧通信超时兜底:静默 chassis_timeout_ms 后底盘自动刹停
-            self.write_frame(f"$SET,TIMEOUT,1,{int(chassis_timeout_ms)}\r\n")
+            self.send_command(f"$SET,TIMEOUT,1,{int(chassis_timeout_ms)}\r\n")
 
         self.cmd_vel_subscription = self.create_subscription(
             Twist, CMD_VEL_TOPIC, self.on_cmd_vel, 10,
@@ -140,7 +187,14 @@ class ChassisBridgeNode(Node):
             "Topic cmd_vel Twist: linear.x=v m/s, angular.z=w rad/s -> $VW stream"
         )
 
-    def write_frame(self, frame):
+    def send_command(self, command, read_timeout_s=READ_TIMEOUT_S):
+        """慢通道:发一帧并读回驱动板应答(带 TX/RX 日志),握手/刹停用。"""
+        return send_command(
+            self.fd, command, read_timeout_s=read_timeout_s, logger=self.get_logger(),
+        )
+
+    def send_command_fast(self, frame):
+        """快通道:写出后只顺手清空接收缓冲,不等应答(20Hz $VW 流用)。"""
         os.write(self.fd, frame.encode("ascii"))
         termios.tcdrain(self.fd)
         read_available(self.fd, VW_DRAIN_TIMEOUT_S)
@@ -158,11 +212,18 @@ class ChassisBridgeNode(Node):
             if not (is_zero and self.last_vw_nonzero):
                 return
 
+        # 进 VW 模式必须验证驱动板接受(读 $OK),否则后续 $VW 会被在非 VW 模式下丢弃、
+        # 车永远不动。没接受就不置位 vw_stream_active,下一帧 cmd_vel 会自动重试进模式。
         if not self.vw_stream_active:
-            self.write_frame(CMD_VW_MODE)
+            result = self.send_command(CMD_VW_MODE)
+            if not result.can_continue:
+                self.get_logger().warning(
+                    "cmd_vel: VW 模式未被驱动板接受(无应答/报错),丢弃本帧,下次重试"
+                )
+                return
             self.vw_stream_active = True
 
-        self.write_frame(make_vw_frame(v, w))
+        self.send_command_fast(make_vw_frame(v, w))
         self.last_vw_send_time = now
         self.last_vw_nonzero = not is_zero
 
@@ -172,7 +233,7 @@ class ChassisBridgeNode(Node):
             return
         if time.monotonic() - self.last_cmd_vel_time > CMD_VEL_TIMEOUT_S:
             self.get_logger().warning("cmd_vel timeout -> $STOP")
-            self.write_frame(CMD_STOP)
+            self.send_command(CMD_STOP)
             self.vw_stream_active = False
             self.last_cmd_vel_time = None
             self.last_vw_nonzero = False
@@ -180,7 +241,7 @@ class ChassisBridgeNode(Node):
     def close(self):
         if self.fd is not None:
             try:
-                self.write_frame(CMD_STOP)
+                self.send_command(CMD_STOP)
             except OSError as exc:
                 self.get_logger().error(f"Failed to send $STOP on close: {exc}")
             os.close(self.fd)
