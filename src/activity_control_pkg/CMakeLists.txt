@@ -58,6 +58,25 @@ ament_target_dependencies(coverage_mission_node
   tf2_geometry_msgs
 )
 
+# 灾区两次投放 任务编排(状态机 + 航点队列同进程)
+add_executable(relief_drop_mission_node
+  src/relief_drop_mission_main.cpp
+  src/mission_sequencer.cpp
+)
+target_link_libraries(relief_drop_mission_node route_target_publisher)
+ament_target_dependencies(relief_drop_mission_node
+  rclcpp
+  std_msgs
+  geometry_msgs
+  tf2
+  tf2_ros
+  tf2_geometry_msgs
+)
+
+# 跨机信号原生 UDP 桥(替代 domain_bridge):req/obst→车,done←车
+add_executable(xmachine_bridge src/xmachine_bridge.cpp)
+ament_target_dependencies(xmachine_bridge rclcpp std_msgs)
+
 install(TARGETS route_target_publisher
   EXPORT export_route_target_publisher
   ARCHIVE DESTINATION lib
@@ -69,6 +88,8 @@ install(TARGETS
   route_target_publisher_node
   route_test_node
   coverage_mission_node
+  relief_drop_mission_node
+  xmachine_bridge
   DESTINATION lib/${PROJECT_NAME}
 )
 

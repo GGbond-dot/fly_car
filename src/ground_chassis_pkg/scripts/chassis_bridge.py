@@ -24,6 +24,7 @@ try:
     import rclpy
     from rclpy.node import Node
     from geometry_msgs.msg import Twist
+    from std_msgs.msg import Int16MultiArray
 except ImportError:
     print(
         "ERROR: 需要在 ROS2 环境中运行,请先 source /opt/ros/<distro>/setup.bash",
@@ -35,6 +36,11 @@ except ImportError:
 DEFAULT_PORT = "/dev/ttyS3"   # 飞车地面底盘 SR5E1E3 板(与 car 同款,但飞车接在 ttyS3)
 DEFAULT_BAUD = 115200
 CMD_VEL_TOPIC = "cmd_vel"
+SERVO_CMD_TOPIC = "servo_cmd"   # Int16MultiArray [index, angle_deg] -> $SERVO(与 $VW 共用本串口)
+
+# 舵机限位($SERVO,index 1~2,angle 0~180;与 fly_car/scripts/servo_test.py 一致)
+SERVO_MIN_INDEX, SERVO_MAX_INDEX = 1, 2
+SERVO_MIN_DEG, SERVO_MAX_DEG = 0, 180
 
 # v 限幅 m/s,w 限幅 rad/s(与 car 版一致)
 V_MIN, V_MAX = -2.0, 2.0
@@ -179,6 +185,11 @@ class ChassisBridgeNode(Node):
         self.cmd_vel_subscription = self.create_subscription(
             Twist, CMD_VEL_TOPIC, self.on_cmd_vel, 10,
         )
+        # 投货舵机:任务节点发 [index, angle] → $SERVO。$SERVO 任何状态可发,不进 VW 模式,
+        # 与 $VW 共用本串口;单线程 executor 回调串行,与 $VW 写不并发。
+        self.servo_subscription = self.create_subscription(
+            Int16MultiArray, SERVO_CMD_TOPIC, self.on_servo_cmd, 10,
+        )
         self.cmd_vel_watchdog = self.create_timer(
             CMD_VEL_WATCHDOG_PERIOD_S, self.check_cmd_vel_timeout,
         )
@@ -226,6 +237,20 @@ class ChassisBridgeNode(Node):
         self.send_command_fast(make_vw_frame(v, w))
         self.last_vw_send_time = now
         self.last_vw_nonzero = not is_zero
+
+    def on_servo_cmd(self, msg):
+        """投货舵机命令 [index, angle_deg] → $SERVO,index,angle。快通道写,不等应答。"""
+        if len(msg.data) < 2:
+            self.get_logger().warning(f"servo_cmd 需要 [index, angle],收到 {list(msg.data)}")
+            return
+        index = int(msg.data[0])
+        angle = int(msg.data[1])
+        if not (SERVO_MIN_INDEX <= index <= SERVO_MAX_INDEX):
+            self.get_logger().warning(f"servo_cmd index={index} 越界 [{SERVO_MIN_INDEX},{SERVO_MAX_INDEX}]")
+            return
+        angle = max(SERVO_MIN_DEG, min(SERVO_MAX_DEG, angle))
+        self.send_command_fast(f"$SERVO,{index},{angle}\r\n")
+        self.get_logger().info(f"servo_cmd -> $SERVO,{index},{angle}")
 
     def check_cmd_vel_timeout(self):
         """桥侧看门狗:cmd_vel 断流即刹停。"""

@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypelang="RNG schematron"?>
+<package format="3">
+  <name>yolo_detector_pkg</name>
+  <version>0.0.1</version>
+  <description>飞车难民识别:YOLOv5s + RK3588 NPU(RKNN),读 /dev/video0 发布 rescuee 检测与标注调试图</description>
+  <maintainer email="AngelBabydoi@computer4u.com">kian</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <!-- 运行时依赖:节点为 rclpy;检测/图像消息;rknnlite、opencv 为板上 pip/系统包,不经 rosdep -->
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
