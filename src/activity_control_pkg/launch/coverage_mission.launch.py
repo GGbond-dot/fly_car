@@ -25,11 +25,16 @@ def generate_launch_description():
                 "yaw_tolerance_deg": 5.0,
                 "height_tolerance_cm": 6.0,
                 # --- 覆盖生成器(⚠ 占位,按场地改)---
+                # 本 launch 是单机弓字形障碍自测:mode=boustrophedon + auto_start 开机自生成。
+                # (飞车任务实走 L 形 mode=l_path,由地面站信号触发,见 relief/coverage 任务 launch)
+                "mode": "boustrophedon",
+                "auto_start": True,
                 "area_x_min_cm": 0.0,
                 "area_x_max_cm": 500.0,
                 "area_y_min_cm": 0.0,
                 "area_y_max_cm": 300.0,
-                "lane_spacing_cm": 50.0,
+                "grid_cell_cm": 100.0,   # 与 web 地图 1m 网格一致
+                "lane_cells": 1.0,       # 行距 = 格子 × 1
                 "cruise_z_cm": 4.0,
                 "start_delay_s": 2.0,
                 # --- 障碍决策(墙逼近→原地起飞+全局 z 覆盖)---

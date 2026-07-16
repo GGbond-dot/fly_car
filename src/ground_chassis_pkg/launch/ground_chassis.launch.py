@@ -53,6 +53,11 @@ def generate_launch_description():
                 # 沿直边却把 carto yaw 噪声放大成画龙(yaw_rate std↑)→ 得不偿失,退回最初平顺值 0.6。
                 # w_max=1.0 留余量(0.6·e_h 到不了,只给 align/chase 收尾用),无害。
                 'kp_w': 0.6, 'w_max_rps': 1.0,    # 转向到前视点的增益/上限;移动中转弯轮子在滚,不卡 stick-slip
+                # ↓ 直线/斜线段(边走边转,|e_h|<align_gate)专用,与上面 align 的 kp_w/w_max 分开限权。
+                # 这套是磨掉「画龙」定下来的平顺值,写死进默认,免得每次重启 launch 又回激进默认再手调。
+                'straight_kp_w': 0.12, 'straight_w_max_rps': 0.10,  # 航向增益/上限压小,不放大 carto yaw 噪声
+                'yaw_lpf_alpha': 0.12,              # carto yaw 重低通,少高频反打(仅滤控制量,不改 TF)
+                'straight_yaw_deadband_deg': 2.0,   # 小航向误差不纠,躲开噪声附近来回反打
                 # pure-pursuit:追前方 lookahead 处的前视点(消近点方位角超敏 + v 塌陷卡顿),自动圆角。
                 # 需 route 端 lookahead_count>0 才生效。大→更顺更抄近路;小→更贴线。40(旧30):更早拐入,角点摊平。
                 'lookahead_dist_cm': 40.0,
@@ -72,10 +77,10 @@ def generate_launch_description():
                 # 弧线测试先设 0:kd 惩罚 yaw_rate,会跟"持续转弯"的弧线对着干。直线收尾才需要它。
                 # kd_w 0→0.06:实测 plant 甩头过冲 2.27×(命令 45°/s、底盘窜 101°/s,stick-slip),
                 # 用实测 yaw_rate 负反馈削 w 压平甩头。太肉/角点外扩回弹→减到 0.03;还抽→加到 0.08。
-                'kd_w': 0.06, 'yaw_rate_lpf_alpha': 0.5,
+                'kd_w': 0.02, 'yaw_rate_lpf_alpha': 0.5,  # 直线段 kd 吃 yaw 差分噪声会助摆,从 0.06 压到 0.02
                 # w 斜率限制(禁止猛打方向,减小对滞后系统的激励):|dw/dt| 上限 rad/s^2。
                 # 起调 3.0(约 0.23s 到 w_max)。太肉→加大;甩头太猛→减小。设 0=不限。
-                'w_slew_rps2': 3.0,
+                'w_slew_rps2': 0.5,   # 从 3.0 压到 0.5:w 变化率限死,反打被强制拉慢(治画龙关键)
                 # align 原地拧最小转速(破底盘起步死区,否则 yaw 拧到最后几度蹭不动、卡死不推进)。
                 # 起调 0.45(≈w_max);还拧不到位→加大或加大 w_max;到位后抖→减小。设 0=关。仅 align 用。
                 'w_min_rps': 0.45,

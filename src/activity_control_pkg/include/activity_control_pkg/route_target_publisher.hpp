@@ -30,8 +30,13 @@ public:
 
   void addTarget(const Target & target);
 
+  // 整条换掉:清空队列换成 batch 并从头开始追。terminal 现场规划的路线走这条
+  // (航点原来只能从启动参数读,所以拍视频那套每段跑完要 Ctrl-C 重启才能换航点)。
+  void setRoute(const std::vector<Target> & batch);
+
   // 在“当前正在追的航点”之前原子插入一串航点(障碍决策插“原地起飞点”用)。
   // 当前目标被往后顶,先飞越再继续原目标;队列尚未开始时等同依次 addTarget。
+  // 投放中断(降 50 → 投货 → 升回)也走这条:插完做完,原巡航路线自动接着走。
   void insertNext(const std::vector<Target> & batch);
 
   // 全局 z 覆盖(飞行模式):active 时发布/到达判定都把 z 顶成 flight_z_cm,
@@ -53,6 +58,8 @@ private:
   void monitorTimerCallback();
   void heightCallback(const std_msgs::msg::Int16::SharedPtr msg);
   void is_st_ready_callback(const std_msgs::msg::UInt8::SharedPtr msg);
+  void routeCallback(const std_msgs::msg::Float32MultiArray::SharedPtr msg);
+  void insertCallback(const std_msgs::msg::Float32MultiArray::SharedPtr msg);
   
   static double meterToCm(double value_m);
   static double radToDeg(double value_rad);
@@ -62,6 +69,8 @@ private:
   rclcpp::Subscription<std_msgs::msg::Int16>::SharedPtr height_sub_;
   rclcpp::TimerBase::SharedPtr monitor_timer_;
   rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr is_st_ready_sub_;
+  rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr route_sub_;
+  rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr insert_sub_;
 
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
@@ -81,12 +90,16 @@ private:
   double yaw_tol_deg_;
   double height_tol_cm_;
   double ground_z_tol_cm_;  // 地面航点 z 容忍(松):忽略地面噪声,但仍能拦住“还没真正降到地面”
+  bool ground_reach_x_only_ = true;  // 地面航点只按 x 判到达(飞车横向修不了、y 会漂)
+  bool takeoff_use_current_xy_ = true;  // 起飞点上方航点 xy 换成当前 TF(就地拉高不横移)
   double air_z_tol_cm_;     // 空中航点 z 容忍(紧):高度要到位
   double land_z_cm_;        // land_after 落点的地面高度
 
   std::string map_frame_;
   std::string laser_link_frame_;
   std::string output_topic_;
+  std::string route_topic_;   // terminal 现场规划的航点从这儿来(空 = 不订,只用启动参数)
+  std::string insert_topic_;  // 投放中断插队航点(空 = 不订)
 
   bool ever_received_st_ready_ = false;   // 只要收到过 1 就永远 true
 };

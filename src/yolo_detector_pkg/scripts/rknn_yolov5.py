@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """YOLOv5 + RKNN(RK3588 NPU)推理与后处理,供 ROS2 节点和独立测试脚本共用。
 
-模型: yoloqian_formal_best_rk3588_int8.rknn (YOLOv5s, 640x640, 2 类 rescuee1/rescuee2)。
+默认模型: yoloqian_formal_best_rk3588_fp16_single_output_640.rknn
+(YOLOv5s, 640x640, 2 类 rescuee1/rescuee2)。
 
 后处理同时兼容两种常见 RKNN 导出:
   A) rknn_model_zoo 标准: 3 个输出分支 [1, 3*(5+nc), h, w] (h/w=80/40/20),
@@ -211,7 +212,12 @@ class RknnYolov5:
         h0, w0 = frame_bgr.shape[:2]
         img, ratio, pad = letterbox(frame_bgr, self.img_size)
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        # RKNN static-shape model input is NHWC with an explicit batch axis:
+        # [1, 640, 640, 3].  Passing a 3-D HWC image makes RKNN reject it.
+        img_rgb = np.ascontiguousarray(img_rgb[None, ...])
         outputs = self.rknn.inference(inputs=[img_rgb], data_format="nhwc")
+        if outputs is None:
+            raise RuntimeError("RKNN inference failed")
         if not self._shape_logged:
             self._log("RKNN output shapes: " +
                       ", ".join(str(np.asarray(o).shape) for o in outputs))

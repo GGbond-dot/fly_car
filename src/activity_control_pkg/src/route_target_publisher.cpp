@@ -28,11 +28,21 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
   yaw_tol_deg_ = declare_parameter("yaw_tolerance_deg", 5.0);
   height_tol_cm_ = declare_parameter("height_tolerance_cm", 12.0);
   ground_z_tol_cm_ = declare_parameter("ground_z_tol_cm", 30.0);  // 地面:松(大)
+  // 地面航点只按 x(行进方向)判到达,不看 y/yaw。飞车锁 yaw=0 直行修不了横向,
+  // y 会漂 30cm 导致按 xy 判永远到不了、冲过头(见 isReached 注释)。默认开。
+  ground_reach_x_only_ = declare_parameter("ground_reach_x_only", true);
+  // 起飞时把“起飞点正上方”航点的 xy 换成飞车当前 TF 位置(就地拉高,不横移)。默认开。
+  takeoff_use_current_xy_ = declare_parameter("takeoff_use_current_xy", true);
   air_z_tol_cm_ = declare_parameter("air_z_tol_cm", 8.0);         // 空中:紧(小)
   land_z_cm_ = declare_parameter("land_z_cm", 4.0);              // land_after 落点高度
   map_frame_ = declare_parameter("map_frame", "map");
   laser_link_frame_ = declare_parameter("laser_link_frame", "laser_link");
   output_topic_ = declare_parameter("output_topic", "/target_position");
+  // terminal 现场规划的路线从这个话题来(xmachine_bridge 收 UDP FC0A 后本地转发)。
+  // 设成空字符串 = 不订阅,只认启动参数 —— 拍视频那套写死航点的 launch 就该这么配。
+  route_topic_ = declare_parameter<std::string>("route_topic", "/wildlife/waypoints");
+  // 投放中断插队航点(降 50 → 升回)。跟 route_topic 不同:它不清队列,做完接着原路线。
+  insert_topic_ = declare_parameter<std::string>("insert_topic", "/route/insert_waypoints");
   // pure-pursuit 前视:>0 时在 /target_position 消息后追加接下来 N 个航点的 xy(cm),供控制器取前视点。
   // 默认 0=不追加,消息仍是 [x,y,z,yaw] 4 位,老订阅者(chassis_mux 等)完全兼容。
   lookahead_count_ = static_cast<std::size_t>(declare_parameter("lookahead_count", 0));
@@ -49,6 +59,20 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
   height_sub_ = create_subscription<std_msgs::msg::Int16>(
     "/height", rclcpp::QoS(10),
     std::bind(&RouteTargetPublisherNode::heightCallback, this, std::placeholders::_1));
+
+  // 桥那边是 latched 发的(晚起也能拿到最后一条路线),这里 QoS 要对上,否则收不到。
+  // 重复包在桥里已按 wp_id 去重过,到这儿的每条都是新路线。
+  if (!route_topic_.empty()) {
+    route_sub_ = create_subscription<std_msgs::msg::Float32MultiArray>(
+      route_topic_, rclcpp::QoS(rclcpp::KeepLast(1)).transient_local().reliable(),
+      std::bind(&RouteTargetPublisherNode::routeCallback, this, std::placeholders::_1));
+  }
+  // 插队用 volatile:它是"此刻插一下"的一次性事件,latched 会让节点重启后又插一次。
+  if (!insert_topic_.empty()) {
+    insert_sub_ = create_subscription<std_msgs::msg::Float32MultiArray>(
+      insert_topic_, rclcpp::QoS(10),
+      std::bind(&RouteTargetPublisherNode::insertCallback, this, std::placeholders::_1));
+  }
 
   monitor_timer_ = create_wall_timer(
     std::chrono::duration<double>(kDefaultTimerPeriodSec),
@@ -71,6 +95,99 @@ void RouteTargetPublisherNode::addTarget(const Target & target)
     current_idx_ = 0;
     publishCurrent();
   }
+}
+
+void RouteTargetPublisherNode::setRoute(const std::vector<Target> & batch_in)
+{
+  if (batch_in.empty()) {
+    RCLCPP_WARN(get_logger(), "收到空路线,忽略(不清空当前队列)");
+    return;
+  }
+  std::vector<Target> batch = batch_in;
+
+  // 起飞用**当前真实位置**就地拉高:空中段(首点 z>20)时,把开头“起飞点正上方”那几个
+  // 航点(xy 与首点相同 = ①原地拉高 ②转 yaw)的 xy 换成飞车当前 TF 的 xy。
+  // 因为地面段只按 x 判到达,飞车实际可能停在偏了 y 30cm 的地方;不换的话飞车会先横移
+  // 回规划的起飞点再拉高。换成当前 xy = 我在哪就从哪原地拔高。后续遍历航点不动。
+  if (takeoff_use_current_xy_ && batch.front().z_cm > 20.0) {
+    double cx = 0.0, cy = 0.0, cz = 0.0, cyaw = 0.0;
+    if (getCurrentPose(cx, cy, cz, cyaw)) {
+      const double fx = batch.front().x_cm;
+      const double fy = batch.front().y_cm;
+      bool first_takeoff = true;
+      for (auto & t : batch) {
+        if (std::hypot(t.x_cm - fx, t.y_cm - fy) < 1.0) {  // 与起飞点同 xy = 起飞拉高段
+          t.x_cm = cx;
+          t.y_cm = cy;
+          if (first_takeoff) {
+            // ①原地拉高:xy 和 yaw 都用停下时的真实姿态,拉高**全程一点都不动 yaw**,
+            // 免得边爬升边拧机头出问题。②转 yaw 点(下一个)才转到规划的飞行航向。
+            t.yaw_deg = cyaw;
+          }
+          first_takeoff = false;
+        } else {
+          break;  // 到第一个遍历点就停,遍历航点保持规划的绝对坐标
+        }
+      }
+      RCLCPP_INFO(get_logger(),
+        "起飞:用当前姿态 (%.0f,%.0f,yaw=%.0f) 就地拉高,拉高不动 yaw,不横移", cx, cy, cyaw);
+    } else {
+      RCLCPP_WARN(get_logger(), "起飞时拿不到 TF,退回用规划起飞点 xy");
+    }
+  }
+
+  std::lock_guard<std::mutex> lock(mutex_);
+  targets_ = batch;
+  current_idx_ = 0;
+  RCLCPP_INFO(get_logger(), "整条换路线: %zu 个航点,从头开始追", targets_.size());
+  publishCurrent();
+}
+
+namespace
+{
+// [x,y,z,yaw,...] 扁平数组 → Target 序列。长度不合法返回空。
+std::vector<Target> parseWaypointArray(const std::vector<float> & d)
+{
+  std::vector<Target> batch;
+  if (d.size() < 4 || d.size() % 4 != 0) {
+    return batch;
+  }
+  batch.reserve(d.size() / 4);
+  for (std::size_t i = 0; i + 3 < d.size(); i += 4) {
+    batch.push_back(Target{d[i], d[i + 1], d[i + 2], d[i + 3]});
+  }
+  return batch;
+}
+}  // namespace
+
+void RouteTargetPublisherNode::routeCallback(const std_msgs::msg::Float32MultiArray::SharedPtr msg)
+{
+  const auto batch = parseWaypointArray(msg->data);
+  if (batch.empty()) {
+    RCLCPP_ERROR(get_logger(),
+      "路线必须是 4 的倍数 [x_cm,y_cm,z_cm,yaw_deg,...],收到 %zu 个数,忽略", msg->data.size());
+    return;
+  }
+  RCLCPP_INFO(get_logger(), "收到 %s 的新路线(%zu 航点),首点 x=%.1f y=%.1f z=%.1f yaw=%.1f",
+    route_topic_.c_str(), batch.size(),
+    batch.front().x_cm, batch.front().y_cm, batch.front().z_cm, batch.front().yaw_deg);
+  setRoute(batch);
+}
+
+// 投放中断:插队航点(降 50 → 升回)。做完自动接着原巡航路线,**不清队列** ——
+// 跟 route_topic 的"整条换掉"完全不同,别搞混。
+void RouteTargetPublisherNode::insertCallback(
+  const std_msgs::msg::Float32MultiArray::SharedPtr msg)
+{
+  const auto batch = parseWaypointArray(msg->data);
+  if (batch.empty()) {
+    RCLCPP_ERROR(get_logger(),
+      "插队航点必须是 4 的倍数,收到 %zu 个数,忽略", msg->data.size());
+    return;
+  }
+  RCLCPP_INFO(get_logger(), "插队 %zu 个航点(首点 x=%.1f y=%.1f z=%.1f),做完接着走原路线",
+    batch.size(), batch.front().x_cm, batch.front().y_cm, batch.front().z_cm);
+  insertNext(batch);
 }
 
 void RouteTargetPublisherNode::insertNext(const std::vector<Target> & batch)
@@ -232,10 +349,20 @@ bool RouteTargetPublisherNode::isReached(
   const bool yaw_ok = (std::fabs(dyaw) <= yaw_tol_deg_);
 
   if (airborne) {
-    // 空中航点:高度到位 + xy 到位,放宽 yaw
-    return z_ok && xy_ok;
+    // 空中航点也必须等 yaw 到位。follow 路线把每个角点拆成“到点保持来向 +
+    // 同 xy/z 原地转向”两个航点；若这里忽略 yaw，第二个原地转航点会被立即跳过，
+    // 下一段就会边移动边转头，破坏任务铁律。
+    return z_ok && xy_ok && yaw_ok;
   }
-  // 地面航点:xy + yaw + (松)z 都要满足
+
+  // 地面航点:飞车锁 yaw=0 沿 x 直行,横向(y)修不了、还会漂 30cm ——
+  // 若按 xy 一起判,y 一漂就永远到不了,飞车会冲过头(07-16 实测)。所以地面段
+  // **只看 x 到位**(沿行进方向),不看 y、不看 yaw;起飞点由 mission 用当前真实 x/y 就地插。
+  if (ground_reach_x_only_) {
+    const bool x_ok = (std::fabs(dx) <= pos_tol_cm_);
+    return z_ok && x_ok;
+  }
+  // 兼容旧行为:xy + yaw + (松)z 都要满足
   return z_ok && xy_ok && yaw_ok;
 }
 
@@ -326,7 +453,23 @@ RouteTestNode::RouteTestNode(
     200.0, 200.0, 100.0, 0.0,
     0.0, 200.0, 100.0, 0.0,
     0.0, 200.0, 0.0, 0.0};
+  // preload_waypoints:=false = 不预装任何航点,起来就静静等 route_topic 下发
+  // (terminal 现场规划走这条)。**Tier0/巡航的 launch 必须传它** —— 否则会先按上面
+  // 那条演示航点(前进 2m、升到 100cm 飞方形)飞出去,规划的路线还没到就已经起飞了。
+  //
+  // ⚠ 为什么不是 waypoints:=[]:空列表根本传不进 ROS 2 参数系统 ——
+  //   launch 对 [] 推断不出元素类型,直接抛 "Expected 'value' to be one of
+  //   [float,int,str,bool,bytes], but got '()'",整个 TimerAction 批全起不来;
+  //   就算绕过 launch(ParameterValue/TextSubstitution),YAML 的空序列到了 rcl 也是
+  //   PARAMETER_NOT_SET,declare_parameter<vector<double>> 拿到的是类型不符的覆盖值。
+  //   2026-07-16 上板实测:现象是 carto/桥/yolo 都正常(位置能回传)、飞车就是不动。
+  const bool preload = declare_parameter<bool>("preload_waypoints", true);
   const auto flat = declare_parameter<std::vector<double>>("waypoints", default_wp);
+
+  if (!preload || flat.empty()) {
+    RCLCPP_INFO(get_logger(), "不预装航点:等 route_topic 下发路线。");
+    return;
+  }
 
   if (flat.size() < 4 || flat.size() % 4 != 0) {
     RCLCPP_FATAL(get_logger(),

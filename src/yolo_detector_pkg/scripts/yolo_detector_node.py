@@ -47,6 +47,7 @@ import cv2
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from rknn_yolov5 import RknnYolov5, draw_detections, load_class_names  # noqa: E402
 from mjpeg_server import MjpegServer  # noqa: E402
+from udp_video_sender import UdpVideoSender  # noqa: E402
 
 
 def default_model_dir():
@@ -79,8 +80,10 @@ class YoloDetectorNode(Node):
     def __init__(self):
         super().__init__("yolo_detector")
         md = default_model_dir()
-        self.declare_parameter("model_path",
-                               os.path.join(md, "yoloqian_formal_best_rk3588_int8.rknn"))
+        self.declare_parameter(
+            "model_path",
+            os.path.join(md, "yoloqian_formal_best_rk3588_fp16_single_output_640.rknn"),
+        )
         self.declare_parameter("classes_path", os.path.join(md, "classes.txt"))
         self.declare_parameter("camera_device", "/dev/video0")
         self.declare_parameter("frame_width", 640)
@@ -89,12 +92,19 @@ class YoloDetectorNode(Node):
         self.declare_parameter("conf_thresh", 0.25)
         self.declare_parameter("nms_thresh", 0.45)
         self.declare_parameter("img_size", 640)
+        # 相机装歪了要扶正:采集后、推理前旋转。取值 none/cw90/ccw90/180
+        self.declare_parameter("rotate", "cw90")
         self.declare_parameter("publish_debug", False)
         self.declare_parameter("jpeg_quality", 70)
         self.declare_parameter("npu_core", "auto")
         self.declare_parameter("enable_stream", True)
         self.declare_parameter("stream_host", "0.0.0.0")
         self.declare_parameter("stream_port", 8080)
+        # 跨机视频:标注帧裸 UDP(FC08)分块发给车,车侧 flycar_video_bridge 重组 ->
+        # /flycar/camera/image/compressed -> 平板"机"看流。默认开。
+        self.declare_parameter("enable_udp_video", True)
+        self.declare_parameter("car_ip", "192.168.10.161")
+        self.declare_parameter("video_port", 8892)
 
         model_path = self.get_parameter("model_path").value
         classes_path = self.get_parameter("classes_path").value
@@ -104,6 +114,7 @@ class YoloDetectorNode(Node):
         rate = float(self.get_parameter("infer_rate_hz").value)
         self.publish_debug = bool(self.get_parameter("publish_debug").value)
         self.jpeg_quality = int(self.get_parameter("jpeg_quality").value)
+        self.rotate_code = self._resolve_rotate(self.get_parameter("rotate").value)
 
         if not os.path.isfile(model_path):
             raise FileNotFoundError(f"model not found: {model_path}")
@@ -132,14 +143,35 @@ class YoloDetectorNode(Node):
             port = int(self.get_parameter("stream_port").value)
             self.stream = MjpegServer(host, port, title="flycar rescuee").start()
             self.get_logger().info(f"MJPEG 推流: http://{host}:{port}/  (浏览器直接看)")
-        self.want_annotated = self.stream is not None or self.img_pub is not None
+
+        self.video_tx = None
+        if bool(self.get_parameter("enable_udp_video").value):
+            car_ip = self.get_parameter("car_ip").value
+            video_port = int(self.get_parameter("video_port").value)
+            self.video_tx = UdpVideoSender(
+                car_ip, video_port, logger=lambda m: self.get_logger().info(m))
+
+        # 是否需要标注帧(MJPEG 推流 / ROS 调试话题 / 跨机 UDP 任一开启)
+        self.want_annotated = (
+            self.stream is not None or self.img_pub is not None
+            or self.video_tx is not None)
 
         self.timer = self.create_timer(1.0 / max(rate, 1.0), self.on_timer)
         self._miss = 0
         self.get_logger().info(
             f"yolo_detector up: {self.device} {self.width}x{self.height} "
             f"@{rate:.0f}Hz classes={self.class_names} "
-            f"stream={self.stream is not None} ros_debug={self.publish_debug}")
+            f"stream={self.stream is not None} ros_debug={self.publish_debug} "
+            f"udp_video={self.video_tx is not None}")
+
+    @staticmethod
+    def _resolve_rotate(name):
+        return {
+            "none": None,
+            "cw90": cv2.ROTATE_90_CLOCKWISE,
+            "ccw90": cv2.ROTATE_90_COUNTERCLOCKWISE,
+            "180": cv2.ROTATE_180,
+        }.get(str(name).lower(), None)
 
     def _open_camera(self):
         cap = cv2.VideoCapture(self.device, cv2.CAP_V4L2)
@@ -150,6 +182,8 @@ class YoloDetectorNode(Node):
         cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+        # 只留 1 帧缓冲:每次读最新帧,避免驱动排队旧帧累积延迟
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         return cap
 
     def on_timer(self):
@@ -160,6 +194,8 @@ class YoloDetectorNode(Node):
                 self.get_logger().warn(f"camera read failed x{self._miss}")
             return
         self._miss = 0
+        if self.rotate_code is not None:
+            frame = cv2.rotate(frame, self.rotate_code)
 
         dets = self.model.infer(frame)
         self._publish_detections(dets)
@@ -174,6 +210,8 @@ class YoloDetectorNode(Node):
                     self.stream.update_frame(jpeg)
                 if self.img_pub is not None:
                     self._publish_debug_image(jpeg)
+                if self.video_tx is not None:
+                    self.video_tx.send(jpeg)
 
     def _publish_detections(self, dets):
         msg = Float32MultiArray()
@@ -199,6 +237,8 @@ class YoloDetectorNode(Node):
         try:
             if self.stream is not None:
                 self.stream.stop()
+            if self.video_tx is not None:
+                self.video_tx.close()
             if self.cap is not None:
                 self.cap.release()
             self.model.release()

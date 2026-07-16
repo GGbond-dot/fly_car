@@ -9,7 +9,7 @@
 //         TF map←laser_link(自身位姿)
 //   输出  /cmd_vel(Twist,linear.x=v m/s, angular.z=w rad/s)→ chassis_bridge 转 $VW
 //
-// 控制律(carrot-chasing):同 car 版,先对准方位再前进。
+// 控制律:有前视点时保留 pure-pursuit;当前 L 路线无前视点,按航点 yaw 分成固定航向直走/到点原地转。
 // 使能门:!ground_enable 时持续发零速(轮子停),不跑控制律。
 
 #include <cmath>
@@ -77,14 +77,20 @@ public:
     declare_parameter<double>("v_max_mps", 0.4);
     declare_parameter<double>("kp_w", 1.5);             // w = kp_w * 角度误差(rad)
     declare_parameter<double>("w_max_rps", 1.0);
+    // 直线微调与原地转向必须分开限权:前者要柔,后者要有力。kp_w/w_max 只管 align。
+    declare_parameter<double>("straight_kp_w", 0.35);
+    declare_parameter<double>("straight_w_max_rps", 0.25);
     // 航向环积分项:消掉左右轮恒定速度差导致的直行跑偏(纯 P 会留常驻航向误差)。
     // 只在小方位误差(实际前进)时积分,大误差转向/到点时清零,防 windup。
-    declare_parameter<double>("ki_w", 0.0);             // 积分增益,0=退化为纯 P;上板从 0.3 起调
+    declare_parameter<double>("ki_w", 0.0);             // 兼容旧参数;L 直线段强制禁积分
     declare_parameter<double>("iw_limit_rps", 0.3);     // 积分项输出限幅(rad/s),抗饱和
     // 航向环微分阻尼:万向轮拖距=纯滞后系统,纯 P 收尾必超调/摆动。用 yaw 角速度做负反馈
     // (物理即"别转太猛"),不对 e_h 直接微分(近点方位角 atan2 抖会踢飞)。默认 0=关,上板起调。
     declare_parameter<double>("kd_w", 0.0);             // 微分增益:w -= kd_w * yaw_rate
     declare_parameter<double>("yaw_rate_lpf_alpha", 0.5);  // yaw_rate 估计的一阶低通(0..1,1=不滤波)
+    // Cartographer yaw 本身也要低通:P 项若直接吃原始 yaw,定位抖动会变成左右打方向。
+    declare_parameter<double>("yaw_lpf_alpha", 0.25);    // 0..1,越小越平滑;仅滤控制量,不改 TF
+    declare_parameter<double>("straight_yaw_deadband_deg", 1.0);  // 直线小误差不纠,避免噪声附近来回反打
     // w 斜率限制:禁止 w 每拍瞬跳(spin→直行切换、e_h 反号),减小对滞后系统的激励。0=不限。
     declare_parameter<double>("w_slew_rps2", 0.0);      // |dw/dt| 上限(rad/s^2)
     // align 原地拧的最小转速:破底盘起步死区,让 yaw 能真拧到 yaw_tol 内(0=关)。仅 align 用,不影响直行。
@@ -120,10 +126,15 @@ public:
     v_max_ = get_parameter("v_max_mps").as_double();
     kp_w_ = get_parameter("kp_w").as_double();
     w_max_ = get_parameter("w_max_rps").as_double();
+    straight_kp_w_ = get_parameter("straight_kp_w").as_double();
+    straight_w_max_ = get_parameter("straight_w_max_rps").as_double();
     ki_w_ = get_parameter("ki_w").as_double();
     iw_limit_ = get_parameter("iw_limit_rps").as_double();
     kd_w_ = get_parameter("kd_w").as_double();
     yaw_rate_alpha_ = clamp(get_parameter("yaw_rate_lpf_alpha").as_double(), 0.0, 1.0);
+    yaw_lpf_alpha_ = clamp(get_parameter("yaw_lpf_alpha").as_double(), 0.0, 1.0);
+    straight_yaw_deadband_rad_ =
+      get_parameter("straight_yaw_deadband_deg").as_double() * M_PI / 180.0;
     w_slew_ = get_parameter("w_slew_rps2").as_double();
     w_min_ = get_parameter("w_min_rps").as_double();
     lookahead_m_ = get_parameter("lookahead_dist_cm").as_double() / 100.0;
@@ -200,10 +211,16 @@ public:
       else if (n == "v_max_mps") v_max_ = p.as_double();
       else if (n == "kp_w") kp_w_ = p.as_double();
       else if (n == "w_max_rps") w_max_ = p.as_double();
+      else if (n == "straight_kp_w") straight_kp_w_ = p.as_double();
+      else if (n == "straight_w_max_rps") straight_w_max_ = p.as_double();
       else if (n == "ki_w") ki_w_ = p.as_double();
       else if (n == "iw_limit_rps") iw_limit_ = p.as_double();
       else if (n == "kd_w") kd_w_ = p.as_double();
       else if (n == "yaw_rate_lpf_alpha") yaw_rate_alpha_ = clamp(p.as_double(), 0.0, 1.0);
+      else if (n == "yaw_lpf_alpha") yaw_lpf_alpha_ = clamp(p.as_double(), 0.0, 1.0);
+      else if (n == "straight_yaw_deadband_deg") {
+        straight_yaw_deadband_rad_ = p.as_double() * M_PI / 180.0;
+      }
       else if (n == "w_slew_rps2") w_slew_ = p.as_double();
       else if (n == "w_min_rps") w_min_ = p.as_double();
       else if (n == "lookahead_dist_cm") lookahead_m_ = p.as_double() / 100.0;
@@ -227,9 +244,29 @@ private:
         "target_position requires 4 floats [x_cm, y_cm, z_cm, yaw_deg]");
       return;
     }
-    target_x_m_ = static_cast<double>(msg->data[0]) / 100.0;
-    target_y_m_ = static_cast<double>(msg->data[1]) / 100.0;
-    target_yaw_rad_ = static_cast<double>(msg->data[3]) * M_PI / 180.0;
+    const double new_x_m = static_cast<double>(msg->data[0]) / 100.0;
+    const double new_y_m = static_cast<double>(msg->data[1]) / 100.0;
+    const double new_yaw_rad = static_cast<double>(msg->data[3]) * M_PI / 180.0;
+
+    // 航点 yaw 表示“从该点出发的下一段航向”。目标从 N 切到 N+1 时锁存 N 的 yaw:
+    // N→N+1 全程保持固定航向,到 N+1 停车后才由 align 对准 N+1 的 yaw。
+    // route 每 50ms 心跳重发当前目标,不能每包都重置下面的阶段状态。
+    const bool target_changed =
+      !has_target_ || std::hypot(new_x_m - target_x_m_, new_y_m - target_y_m_) > 1e-6 ||
+      std::fabs(normalizeAngle(new_yaw_rad - target_yaw_rad_)) > 1e-6;
+    if (!has_target_) {
+      drive_yaw_rad_ = new_yaw_rad;
+    } else if (target_changed) {
+      drive_yaw_rad_ = target_yaw_rad_;
+    }
+    if (target_changed) {
+      position_reached_ = false;
+      iw_integral_ = 0.0;
+    }
+
+    target_x_m_ = new_x_m;
+    target_y_m_ = new_y_m;
+    target_yaw_rad_ = new_yaw_rad;
     // 第 4 位起是 pure-pursuit 前视航点(每 2 个一组 xy,cm);没有则退化为纯末点趋近。
     next_pts_.clear();
     for (std::size_t i = 4; i + 1 < msg->data.size(); i += 2) {
@@ -287,6 +324,8 @@ private:
     last_w_cmd_ = 0.0;
     yaw_rate_filt_ = 0.0;
     have_prev_yaw_ = false;
+    yaw_filt_ = 0.0;
+    have_yaw_filt_ = false;
   }
 
   void controlTimerCallback()
@@ -323,6 +362,16 @@ private:
       return;
     }
 
+    // 角度 EMA 要沿最短角差更新,否则跨 ±pi 时会错误地绕一整圈。
+    if (!have_yaw_filt_) {
+      yaw_filt_ = yaw;
+      have_yaw_filt_ = true;
+    } else {
+      yaw_filt_ = normalizeAngle(
+        yaw_filt_ + yaw_lpf_alpha_ * normalizeAngle(yaw - yaw_filt_));
+    }
+    yaw = yaw_filt_;  // 后续 P/D/align 全用滤波 yaw,位置仍是原始 TF
+
     // yaw 角速度估计(相邻两拍雷达 yaw 差分 + 一阶低通)→ 航向环 D 阻尼用
     double yaw_rate = 0.0;
     if (have_prev_yaw_) {
@@ -335,6 +384,13 @@ private:
     have_prev_yaw_ = true;
 
     const double d = std::hypot(target_x_m_ - x, target_y_m_ - y);
+    if (!position_reached_ && d <= pos_tol_m_) {
+      // 单向阶段门:一旦到点就只允许原地转。Cartographer 位置抖出容差也不能重新起步,
+      // 否则会在 chase/align 间反复横跳,破坏“到点停车再转 yaw”的铁律。
+      position_reached_ = true;
+      iw_integral_ = 0.0;
+      last_w_cmd_ = 0.0;
+    }
 
     double v = 0.0;
     double w = 0.0;
@@ -363,23 +419,23 @@ private:
       // v_min 地板只在大致直行(|e_h|<门)时兜底防死区;急拐放开,让 v 贴 cos 降速原地拧 → 角点半径变小不外扩
       if (v > 1e-3 && v_min_ > 1e-9 && v < v_min_ &&
           std::fabs(e_h) < v_floor_gate_rad_) v = v_min_;
-    } else if (d > pos_tol_m_) {
-      // ===== 末航点趋近:沿用 carrot(align_gate 门 + 直行积分 + 按 d 降速到停) =====
-      phase = "chase";
-      const double e_h = normalizeAngle(std::atan2(target_y_m_ - y, target_x_m_ - x) - yaw);
+    } else if (!position_reached_) {
+      // ===== L 路线固定航向直走 =====
+      // 位置只决定速度/到点,移动航向始终是上一航点给定的 drive_yaw。
+      // 不再追 atan2(目标点-当前位置):那个视线角会随横向误差变化,近点尤其敏感。
+      phase = "straight";
+      const double e_h = normalizeAngle(drive_yaw_rad_ - yaw);
       log_e = e_h;
-      if (ki_w_ > 1e-9 && std::fabs(e_h) <= align_gate_rad_) {
-        iw_integral_ += e_h * control_dt_;
-        iw_integral_ = clamp(iw_integral_, -iw_limit_ / ki_w_, iw_limit_ / ki_w_);
-        i_term = ki_w_ * iw_integral_;
+      // 直线段禁积分:底盘有明显延迟,积分会在误差反号后继续推旧方向,形成左右极限环。
+      iw_integral_ = 0.0;
+      if (std::fabs(e_h) <= align_gate_rad_) {
         v = clamp(kp_v_ * d, 0.0, v_max_) * std::cos(e_h);
-      } else {
-        iw_integral_ = 0.0;
-        if (std::fabs(e_h) <= align_gate_rad_) {
-          v = clamp(kp_v_ * d, 0.0, v_max_) * std::cos(e_h);
-        }
       }
-      w = clamp(kp_w_ * e_h + i_term - kd_w_ * yaw_rate_filt_ + w_bias_, -w_max_, w_max_);
+      if (std::fabs(e_h) > straight_yaw_deadband_rad_) {
+        w = clamp(
+          straight_kp_w_ * e_h - kd_w_ * yaw_rate_filt_ + w_bias_,
+          -straight_w_max_, straight_w_max_);
+      }
       if (v > 1e-3 && v_min_ > 1e-9 && v < v_min_) v = v_min_;
     } else {
       // ===== 末航点到位:原地对准目标 yaw(带 w_min 破死区,kd 先减后兜底见注) =====
@@ -428,8 +484,10 @@ private:
 
   // 参数
   double kp_v_, v_max_, kp_w_, w_max_;
+  double straight_kp_w_{0.35}, straight_w_max_{0.25};
   double ki_w_{0.0}, iw_limit_{0.3}, control_dt_{0.05};
   double kd_w_{0.0}, yaw_rate_alpha_{0.5}, w_slew_{0.0}, w_min_{0.0};
+  double yaw_lpf_alpha_{0.25}, straight_yaw_deadband_rad_{1.0 * M_PI / 180.0};
   double lookahead_m_{0.3}, v_min_{0.0}, v_floor_gate_rad_{M_PI}, w_bias_{0.0};
   std::vector<P2> next_pts_;   // pure-pursuit 前视航点(map, m),route 追加而来
   double align_gate_rad_, pos_tol_m_, yaw_tol_rad_;
@@ -444,6 +502,8 @@ private:
   bool have_prev_yaw_{false};
   double yaw_rate_filt_{0.0};
   double last_w_cmd_{0.0};
+  double yaw_filt_{0.0};
+  bool have_yaw_filt_{false};
 
   // 调参日志
   std::ofstream csv_;
@@ -451,6 +511,8 @@ private:
 
   // 状态
   double target_x_m_{0.0}, target_y_m_{0.0}, target_yaw_rad_{0.0};
+  double drive_yaw_rad_{0.0};  // 当前移动段锁定航向(上一航点 yaw)
+  bool position_reached_{false};  // 同一目标一旦到点,只转不再重新追位置
   bool has_target_{false};
   bool silenced_{false};
   bool ground_enabled_{false};

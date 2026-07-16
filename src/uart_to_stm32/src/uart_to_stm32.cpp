@@ -326,12 +326,20 @@ void UartToStm32::protocolDataHandler(uint8_t id, const std::vector<uint8_t> & d
         RCLCPP_WARN(node_->get_logger(), "protocolDataHandler: ID 0x05 data too short");
         break;
       }
-      const int16_t value = static_cast<int16_t>(static_cast<uint16_t>(data[0]) |
+      const int16_t raw_value = static_cast<int16_t>(static_cast<uint16_t>(data[0]) |
         (static_cast<uint16_t>(data[1]) << 8));
+      // 激光测高离地太近时会吐出很大的无效值（现场见 5120）。飞车任务最高
+      // 只有约 100cm，超过 200cm 一律按近地 2cm 处理，避免 mux 误切飞行态、
+      // 高度 PID 持续下压。
+      const int16_t value = raw_value > 200 ? 2 : raw_value;
       std_msgs::msg::Int16 msg;
       msg.data = value;
       if (height_pub_) {
         height_pub_->publish(msg);
+        if (raw_value > 200) {
+          RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 2000,
+            "Invalid near-ground height %dcm (>200), clamp to 2cm", raw_value);
+        }
         RCLCPP_INFO_THROTTLE(node_->get_logger(), *node_->get_clock(), 1000,
           "Published /height: %d", value);
       } else {

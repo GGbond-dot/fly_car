@@ -68,11 +68,18 @@
 | `FC04` | 车→飞车 | bool | `/resupply_done` 补给完成、已退开 |
 | `FC05` | 飞车→车 | uint8=类别 | `/rescuee_detected`(Int8:0无/1/2)YOLO 识别标志 |
 | `FC06` | 车→飞车 | bool | `/terminal_confirm` terminal 人机确认 |
+| `FC08` | 飞车→车 | 分块 JPEG | 飞车 YOLO 标注视频流(**独立节点/端口**,见下) |
 
 - 包:`BoolPacket{magic u16, id u16, value u8}`(5B,REQ/DONE/RESCUEE/CONFIRM);`ObstHeader{magic,id,count u16}`+count×f32(OBST)。**改一处两侧同步改。**
 - 端口:车 bind `8890` 收飞车 req/obst/rescuee;飞车 bind `8891` 收车 done/confirm。pose 桥的 `8888` 独立勿混。IP:飞车 `.171` / 车 `.161`。
 - 一次性事件 burst 重发(`resend_count=30 @10Hz≈3s`)扛丢包,收端按 id/内容幂等去重。
 - YOLO 门:飞车桥订 `/yolo_detector/detections`,conf≥`yolo_conf_thresh`(0.25)+连续 `yolo_debounce_frames`(2)帧命中判"识别到",持续重发 FC05(value=类别)。
+
+**FC08 视频流(独立于 xmachine_bridge)**:视频是高频大流量、丢帧无所谓,和控制信号性格相反,故**单独一对节点、单独端口 8892**,不塞进 xmachine_bridge。
+- 发端(飞车):`yolo_detector_pkg/scripts/udp_video_sender.py`,直接复用 yolo_detector 节点里已压好的标注 JPEG(不重编码),按 ≤1400B 分块 UDP 发到车 `8892`。参数 `enable_udp_video`(默认 true)/`car_ip`(.161)/`video_port`(8892)。
+- 收端(车):`follower_pkg/src/flycar_video_bridge.cpp`,bind `8892` 收块,按 `frame_id` 重组,收齐 `chunk_total` 才在车 localhost 发布 `/flycar/camera/image/compressed`(`sensor_msgs/CompressedImage` jpeg);丢块丢整帧不重传,新帧到即丢未完成旧帧(保低延迟)。
+- 包头(小端,两机 ARM):`VideoChunkHeader{magic=0xFC08 u16, frame_id u16, chunk_idx u16, chunk_total u16}`(8B)+ JPEG 分段。**改一处两侧同步改。**
+- 平板显示见第五节:"车 localhost 那跳"才是 FastDDS(平板订 ROS 话题),跨机始终裸 UDP、两机同名话题永不相遇。
 
 ---
 
@@ -91,7 +98,11 @@
 - **投放舵机(飞车,1号,ttyS3)**:倒货 open=**180**、复位 close=**90**(实测);任务起步自动复位到 90 关箱。测试脚本 `fly_car/scripts/servo_test.py`。
 - **摄像头舵机(飞车,2号)**:地面 120 / 飞行 180,由 sequencer 发 `/servo_cmd` → chassis_bridge 转 `$SERVO`。
 - **YOLO**:`yolo_detector_pkg`(YOLOv5s + RK3588 NPU/RKNN),读 /dev/video0,发 `/yolo_detector/detections`(每目标 6 float:cls,conf,x1,y1,x2,y2;cls 0=rescuee1/1=rescuee2)+ MJPEG 推流 `:8080`。
-- **视频给平板**:飞车 MJPEG `http://192.168.10.171:8080/stream.mjpg`(帧带识别框)。car 板 terminal(`kian_ai_0001`)网页里 `<img src=...>` 直接嵌(三者同局域网,平板浏览器直连飞车拉流)。**不走 ROS/DDS。**
+- **视频给平板**:飞车 YOLO 标注视频经跨机链路到平板。`kian_ai` 跑在**车上**(香橙派),android 平板只是 webview 显示端。全链路:
+  `飞车 yolo_detector 标注JPEG → FC08 分块裸UDP:8892 → 车 flycar_video_bridge 重组 → /flycar/camera/image/compressed(车 localhost) → kian_ai FlycarVideoBridge(py, FastDDS 订) → web_server /flycar/stream.mjpg 转MJPEG → 平板 <img>`。
+  - **DDS 只用在车 localhost 最后一跳**(平板订 ROS 话题):两机同名话题未做 namespace,合并 DDS 域会串台,故跨机始终裸 UDP,视频这条也一样。
+  - terminal 侧:新增 `src/ros/flycar_video_bridge.py`(节点名 `kian_flycar_video_bridge`,避免撞车侧 C++ 同名节点)+ web_server 端点 `/flycar/stream.mjpg` + 配置 `FLYCAR.video_stream_url` 默认相对 `/flycar/stream.mjpg`。前端 `video.js` 的 `<img>` 无感切换、零改动。
+  - **兜底/对照**:飞车 yolo_detector 内置 MJPEG 推流 `:8080` 未动;把 `FLYCAR.video_stream_url` 配回 `http://192.168.10.171:8080/stream.mjpg` 即恢复平板直连飞车拉流(绕过车与 ROS)。
 - **人机确认**:terminal 订 `/rescuee_detected`(Int8)→ 语音播报 + 平板弹"投送/取消" → 用户点投送 → 发 `/terminal_confirm`(Bool)→ 飞车右转投货。terminal 与车节点同在默认域 0。
 
 ---
@@ -105,6 +116,10 @@
 | `activity_control_pkg comm_test.launch.py` | 飞车 | 只起 xmachine_bridge,手动 pub/echo 验 5 条跨机信号 |
 | `follower_pkg comm_test.launch.py` | 车 | 同上(对端) |
 | `my_launch yolo_comm_test.launch.py` | 飞车 | yolo_detector + xmachine_bridge,验真实识别→标志→车 + 视频流 |
+| `yolo_detector_pkg yolo_detector.launch.py` | 飞车 | yolo_detector(默认已开 FC08 UDP 视频→车 `.161:8892`) |
+| `follower_pkg flycar_video.launch.py` | 车 | flycar_video_bridge,收 FC08 重组发 `/flycar/camera/image/compressed` |
+
+视频联调:飞车起 yolo_detector → 车起 flycar_video → 车上 `ros2 topic hz /flycar/camera/image/compressed` 应 ~15Hz、`rqt_image_view` 看画面 → 再起 kian_ai,平板视频面板出画面。
 
 各 comm_test / yolo_comm_test 的文件头注释里有逐条测试命令。
 

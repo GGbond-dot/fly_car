@@ -75,7 +75,8 @@ ament_target_dependencies(relief_drop_mission_node
 
 # 跨机信号原生 UDP 桥(替代 domain_bridge):req/obst→车,done←车
 add_executable(xmachine_bridge src/xmachine_bridge.cpp)
-ament_target_dependencies(xmachine_bridge rclcpp std_msgs)
+# tf2_ros:位置回传(FC0C)在本地查 TF map->laser_link,不跨机订阅
+ament_target_dependencies(xmachine_bridge rclcpp std_msgs geometry_msgs tf2 tf2_ros)
 
 install(TARGETS route_target_publisher
   EXPORT export_route_target_publisher

@@ -57,16 +57,18 @@ MissionSequencerNode::MissionSequencerNode(
     throw std::runtime_error("invalid fly_waypoints parameter");
   }
 
+  // 订阅端用 volatile+reliable:terminal(py-xiaozhi rclpy 默认 volatile)与 xmachine_bridge(latched)
+  // 两种发布端都能收(volatile 订阅兼容 volatile/transient_local 发布);节点常驻先于按键,不需 latched 补发。
   resupply_sub_ = create_subscription<std_msgs::msg::Bool>(
-    resupply_topic, rclcpp::QoS(rclcpp::KeepLast(1)).transient_local().reliable(),
+    resupply_topic, rclcpp::QoS(rclcpp::KeepLast(1)).reliable(),
     std::bind(&MissionSequencerNode::resupplyCallback, this, std::placeholders::_1));
   // terminal 确认(经 xmachine_bridge 从车 UDP 转来),视觉握手门
   confirm_sub_ = create_subscription<std_msgs::msg::Bool>(
-    confirm_topic, rclcpp::QoS(rclcpp::KeepLast(1)).transient_local().reliable(),
+    confirm_topic, rclcpp::QoS(rclcpp::KeepLast(1)).reliable(),
     std::bind(&MissionSequencerNode::confirmCallback, this, std::placeholders::_1));
-  // terminal 语音"开始救援"(经 xmachine_bridge 从车 UDP 转来),启动门 latched(边沿使能)
+  // terminal 语音"开始救援"(经 xmachine_bridge 从车 UDP 转来),启动门
   mission_start_sub_ = create_subscription<std_msgs::msg::Bool>(
-    mission_start_topic, rclcpp::QoS(rclcpp::KeepLast(1)).transient_local().reliable(),
+    mission_start_topic, rclcpp::QoS(rclcpp::KeepLast(1)).reliable(),
     std::bind(&MissionSequencerNode::missionStartCallback, this, std::placeholders::_1));
   // 叫车信号 latched(边沿使能),车侧后启动也能收到
   resupply_req_pub_ = create_publisher<std_msgs::msg::Bool>(

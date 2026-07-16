@@ -73,9 +73,11 @@ def generate_launch_description():
             period=1.0,
             actions=[robot_state_publisher_node]
         ),
-        # Step 3: Launch cartographer_node after 4 seconds
+        # Step 3: 启动 cartographer。原本 10s,提前到 5s 让 map->laser_link TF 更早可用
+        # (症状:底盘起来后一直等 carto 出 TF 才动)。lidar 在 T+0、rsp 在 T+1,5s 时
+        # /scan 已在发;别再往前——carto 早于雷达出点只会空等,起步反而更慢。
         TimerAction(
-            period=10.0,
+            period=5.0,
             actions=[cartographer_node]
         ),
     ])

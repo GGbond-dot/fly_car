@@ -1,6 +1,10 @@
 # 平地遍历 + 遇障起飞 —— 任务架构设计
 
 > 状态：架构已定，等场地尺寸到位后填参数并实现"覆盖生成器"和"障碍决策"两个节点。
+>
+> **§八 已于 2026-07-14 晚被取代**：飞车陆地段与车搜索区的下发方式已改，
+> 见 [`terminal/project_markdown/patrol_mission_planning_design.md`](../../terminal/project_markdown/patrol_mission_planning_design.md)。
+> §一~§七 的地空 z 编码、障碍决策、`chassis_mux` 仲裁仍然有效。
 
 ## 一、目标
 
@@ -55,10 +59,11 @@
 
 ## 五、两个待实现节点的设计
 
-### 1. 覆盖生成器（弓字形 / boustrophedon）
+### 1. 覆盖生成器（`coverage_generator`，2026-07-14 起双模式）
 
-- 输入参数：场地 `x/y` 范围、行距 `lane_spacing`、巡航高度 `cruise_z`（地面值）、行进 yaw。
-- 逻辑：在场地范围内按行距生成来回扫描航点（一行正向、下一行反向），全部 z=`cruise_z`，依次 `addTarget()`。
+`mode` 参数切换，详见 §八（地面站选区驱动）。
+- **`l_path`（飞车任务默认）**：L 形，只转 1 个直角弯。飞车地面没调好、不宜多走 —— 起点→拐角（障碍前）→转 90°→终点，两航点用 `l_start/l_corner/l_end` 参数（map 系 cm）。走完起飞飞越归障碍决策/z 编码，不在本生成器。
+- **`boustrophedon`（单机自测/整片覆盖）**：弓字形，贴 1m 网格来回扫（一行正向 yaw=0、下一行反向 yaw=180，全部 z=`cruise_z`，`addTarget()`）。区域边界吸附网格线、行距=`grid_cell_cm`×`lane_cells`。
 
 ### 2. 障碍决策（遇墙起飞）
 
@@ -86,3 +91,51 @@
 
 - 折线检测假设墙连续；若实测拐点很尖锐或断开，调 `split_threshold_m` / `chain_break_dist_m`。
 - 按双设备工作流：本地写代码 + git，开发板 `colcon build` 与实测，syncpi 传输。
+
+## 八、地面站选区驱动的车+飞车地面覆盖（2026-07-14）
+
+> ⚠️ **本节已被取代（2026-07-14 晚）**，保留仅为记录旧做法，**不要照此实现**。
+> 现行设计见终端侧 [`patrol_mission_planning_design.md`](../../terminal/project_markdown/patrol_mission_planning_design.md)。
+>
+> 两处关键变更：
+> 1. **飞车的陆地段不再由飞车端 `coverage_generator(mode=l_path)` 自己生成**。改由终端 planner
+>    按实测障碍折线算出转场路线，当 `z=0` 航点混在 `/wildlife/waypoints` 里走 **FC0A** 下发。
+>    理由：只有终端手里有地图和实测障碍，飞车端拍 `l_start/l_corner/l_end` 参数是瞎猜。
+>    因此 **FC09 不再触发飞车 L 形**（终端侧 `dispatch(start_flycar=False)`），FC09 目前空出未用。
+> 2. **车的搜索区不再靠手动框选**。分界线由 FC03 实测障碍决定，左侧整块自动派给车。
+>    网格也从 1m 粗格改为 **0.5m（10×8）**。
+
+用户思路定案：地面站在地图上**框选一块遍历区**，一点即下发；**车做主力弓字形覆盖**（多转弯无所谓），**飞车只走极简 L 形**（1 个直角弯，飞车地面没调好、不宜多走），**不平均分**（框选区只给车，飞车 L 独立参数定义）。路径**贴 web 地图 1m 网格**走。
+
+### 全链路
+
+```
+地面站(/slam 页,car 上跑) 框选矩形(贴1m网格,coverage_select.js)
+   → POST /api/coverage_region {minX,maxX,minY,maxY}(米)
+   → kian_ai coverage_dispatch_bridge:
+        ├─ 车: 本地发 /coverage_area(Float32MultiArray[x_min,x_max,y_min,y_max]cm, latched)
+        │        → follower_pkg/coverage_route_publisher: 贴格子弓字形航点 → /target_position → diff_drive
+        └─ 飞车: 发 /flycar_coverage_start(Bool)
+                 → 车 xmachine_bridge → UDP FC09 → 飞车 xmachine_bridge → 本地发 /coverage_area
+                 → activity_control_pkg/coverage_generator(mode=l_path): L 形航点(用 l_* 参数) → RouteTargetPublisher
+```
+
+### 地图坐标系（/slam 页）
+
+固定 5m×4m 俯视图，**ROS map 系：x∈[0,5]m 向右、y∈[0,4]m 向上、原点左下**。SVG `map-grid` = 1m/格（框选吸附的网格）。obstacle-overlay viewBox 500×400(cm)，`toSvgPoint` y 翻转。coverage_select.js 屏幕→米→吸附 1m→POST。
+
+### 参数（尺寸没量，先占位，现场量了填）
+
+- 飞车 L：`l_start_x/y_cm`(固定起点)、`l_corner_x/y_cm`(障碍前拐角)、`l_end_x/y_cm`(转弯后终点)。map 系 cm。
+- 车/飞车弓字形：`grid_cell_cm`(默认100=1m,与 web 网格一致)、`lane_cells`(行距=格子×几,默认1)。
+- 车到达容差 `pos_tol_cm/yaw_tol_deg`(≥diff_drive)。
+
+### 跨机协议
+
+新增 `FC09`(车→飞车,BoolPacket,burst 重发)：地面站选区后"覆盖开跑"。飞车侧收到本地发 `/coverage_area`(latched, [0,0,0,0] 占位,l_path 只当开跑信号)。见 relief_drop_mission_design.md §三。
+
+### 现场待调
+
+- 飞车 L 形拐角/终点参数按场地量；生成器会警告拐角偏离 90°。
+- 车弓字形每行末 180° 掉头接近原地转,车前驱+后万向轮不擅长 —— 可能要把行末做成小圆弧过渡(现只出标准弓字形航点)。
+- 飞车走完 L 的"起飞→飞越→覆盖另一边"仍走原障碍决策/z 编码,尚未与 L 终点自动衔接(TODO)。

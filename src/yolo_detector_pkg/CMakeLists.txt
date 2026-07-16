@@ -10,6 +10,7 @@ install(PROGRAMS
   scripts/yolo_detector_node.py
   scripts/rknn_yolov5.py
   scripts/mjpeg_server.py
+  scripts/udp_video_sender.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
