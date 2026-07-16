@@ -124,6 +124,9 @@ def generate_launch_description():
             "from_car_port": 8891,
             "send_hz": 10.0,
             "resend_count": 30,
+            # 高度仅在飞车板本地判断；连续两次 >=60cm 后只 burst FC10 标志。
+            "airborne_height_cm": 60,
+            "airborne_required_samples": 2,
             "pose_hz": 1.0,             # 飞车位置回传(FC0C),/slam 页点云靠它逐步露出
             # 到达飞行起点判定:三道关(TF 新鲜 + 进容差 + 稳住)全过才发 FC0D,只发一次
             "launch_target_x_m": LAUNCH_TARGET_X_M,
@@ -140,6 +143,8 @@ def generate_launch_description():
             "rescuee_y_m": LaunchConfiguration("rescuee_y_m"),
             "rescuee_tol_m": 0.25,
             "rescuee_check_hz": LaunchConfiguration("rescuee_check_hz"),
+            # 固定 Demo 只按难民点坐标播报。YOLO 继续画框/传视频，但不直接发 FC05。
+            "yolo_trigger_rescuee_event": False,
             # 这个难民是**飞车投的空中难民** → class=1。terminal 据此把"确认投放"发
             # /terminal_confirm(→FC06→飞车 rescue_drop),而不是 /car/drop_confirm(车投)。
             # 默认是 2(地面难民=车投),不改的话飞车永远收不到确认、不投货。

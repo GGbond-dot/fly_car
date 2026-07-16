@@ -47,6 +47,7 @@
 #include "rclcpp/rclcpp.hpp"
 #include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/float32_multi_array.hpp"
+#include "std_msgs/msg/int16.hpp"
 #include "std_msgs/msg/string.hpp"
 
 namespace
@@ -69,6 +70,8 @@ constexpr uint16_t kMagicLaunchArrived = 0xFC0D;  // 飞车→车:已到飞行�
 // 那是从没有 pose 的旧分支写的;FC0C 归位置回传,这个是 FC0E。
 constexpr uint16_t kMagicFlightEnable = 0xFC0E;
 constexpr uint16_t kMagicWaypointsAck = 0xFC0F;  // 飞车→车:已收 FC0A,id 与航点包一致
+constexpr uint16_t kMagicAirborne = 0xFC10;  // 飞车→车:本地测高确认已离地(只发标志)
+constexpr uint16_t kMagicAirborneAck = 0xFC11;  // 车→飞车:已收 FC10,id 与事件一致
 constexpr std::size_t kMaxObstFloats = 256;  // 折线/航点数组上限(共用),约束缓冲区
 constexpr std::size_t kMaxStatusBytes = 1024; // 状态 JSON 字节上限
 constexpr int kStatusBurst = 4;               // 每次状态回调发几包(心跳 1Hz,小簇扛丢包)
@@ -156,6 +159,8 @@ public:
         "位置回传换算回场地系)", start_heading_field_deg_, field_to_map_deg_);
     }
     resend_count_  = declare_parameter<int>("resend_count", 30);     // 每次事件重发包数(~3s@10Hz)
+    airborne_height_cm_ = declare_parameter<int>("airborne_height_cm", 60);
+    airborne_required_samples_ = declare_parameter<int>("airborne_required_samples", 2);
     // 飞行起点 A4B8(map 系,米)。**坐标待实测校准** —— 写成参数就是为了不用重编译改。
     launch_x_m_    = declare_parameter<double>("launch_target_x_m", 3.50);
     launch_y_m_    = declare_parameter<double>("launch_target_y_m", -1.50);
@@ -182,6 +187,9 @@ public:
 
     yolo_conf_thresh_ = declare_parameter<double>("yolo_conf_thresh", 0.25);  // 判"识别到"的最低置信度
     yolo_debounce_    = declare_parameter<int>("yolo_debounce_frames", 2);    // 连续几帧命中才算(去抖)
+    // 固定 Demo 只允许“到达写死难民点”触发 FC05。视频/画框仍照常工作。
+    yolo_trigger_rescuee_event_ =
+      declare_parameter<bool>("yolo_trigger_rescuee_event", false);
     const std::string det_topic = declare_parameter<std::string>(
       "yolo_detections_topic", "/yolo_detector/detections");
 
@@ -238,6 +246,10 @@ public:
     // 且这是"允许起飞"的闸门 —— 漏了就永远飞不起来,比重复发一次危险得多。
     flight_enable_pub_ = create_publisher<std_msgs::msg::Bool>(
       "/rescue/flight_search_enable", latched);
+    // 高度只在本板判断，不跨机回传连续数据。达到阈值后仅 burst 一个 FC10 Bool 事件。
+    height_sub_ = create_subscription<std_msgs::msg::Int16>(
+      "/height", rclcpp::QoS(10),
+      std::bind(&XMachineBridge::onHeight, this, std::placeholders::_1));
 
     // 位置回传和到达检测都在本地查 TF,共用一个 buffer(全关掉才不建,行为跟以前一致)。
     if (pose_hz_ > 0.0 || launch_check_hz_ > 0.0 || rescuee_check_hz_ > 0.0) {
@@ -313,6 +325,27 @@ private:
       obst_payload_.size(), obst_id_);
   }
 
+  void onHeight(const std_msgs::msg::Int16::SharedPtr msg)
+  {
+    if (!flight_enable_received_ || airborne_sent_) { return; }
+    const int height_cm = static_cast<int>(msg->data);
+    // 测高异常值绝不能放行；上游也会把 >200 的毛刺压成 2cm，这里再守一道。
+    if (height_cm < airborne_height_cm_ || height_cm > 200) {
+      airborne_samples_ = 0;
+      return;
+    }
+    airborne_samples_++;
+    if (airborne_samples_ < std::max(1, airborne_required_samples_)) { return; }
+    airborne_sent_ = true;
+    airborne_id_++;
+    airborne_remaining_ = resend_count_;
+    airborne_acked_ = false;
+    airborne_retry_ticks_ = 0;
+    RCLCPP_INFO(get_logger(),
+      "测高连续 %d 次 >= %dcm(当前 %dcm) → 向车重发 AIRBORNE(FC10,id=%u)，不回传高度流",
+      airborne_samples_, airborne_height_cm_, height_cm, airborne_id_);
+  }
+
   // 飞行节点状态(1Hz 心跳 + 相位变化)。每次回调发一小簇 UDP 扛丢包;车侧按 id 去重。
   void onStatus(const std_msgs::msg::String::SharedPtr msg)
   {
@@ -326,6 +359,9 @@ private:
   // 连续 yolo_debounce_ 帧命中同类才判"识别到",持续向车重发 RESCUEE(value=类别 1/2)。
   void onDetections(const std_msgs::msg::Float32MultiArray::SharedPtr msg)
   {
+    if (!yolo_trigger_rescuee_event_) {
+      return;
+    }
     int best_cls = -1;
     double best_conf = yolo_conf_thresh_;
     for (std::size_t i = 0; i + 5 < msg->data.size(); i += 6) {
@@ -489,6 +525,23 @@ private:
 
   void sendTick()
   {
+    bool send_airborne = false;
+    if (airborne_remaining_ > 0) {
+      send_airborne = true;
+      airborne_remaining_--;
+    } else if (airborne_sent_ && !airborne_acked_) {
+      // 首轮 burst 后仍无 ACK：约 1Hz 低频重试，Wi-Fi 恢复后自动闭环。
+      airborne_retry_ticks_++;
+      if (airborne_retry_ticks_ >= std::max(1, static_cast<int>(send_hz_))) {
+        airborne_retry_ticks_ = 0;
+        send_airborne = true;
+      }
+    }
+    if (send_airborne) {
+      BoolPacket pkt{kMagicAirborne, airborne_id_, 1};
+      ::sendto(tx_fd_, &pkt, sizeof(pkt), 0,
+        reinterpret_cast<const sockaddr *>(&car_addr_), sizeof(car_addr_));
+    }
     if (launch_arrived_remaining_ > 0) {
       BoolPacket pkt{kMagicLaunchArrived, launch_arrived_id_, 1};
       ::sendto(tx_fd_, &pkt, sizeof(pkt), 0,
@@ -595,7 +648,13 @@ private:
       if (n != static_cast<ssize_t>(sizeof(BoolPacket))) { continue; }
       BoolPacket pkt;
       std::memcpy(&pkt, buf, sizeof(pkt));
-      if (pkt.magic == kMagicDone && !done_published_) {
+      if (pkt.magic == kMagicAirborneAck && pkt.value && pkt.id == airborne_id_) {
+        if (!airborne_acked_) {
+          airborne_acked_ = true;
+          airborne_remaining_ = 0;
+          RCLCPP_INFO(get_logger(), "车已确认收到 AIRBORNE(FC10,id=%u)，停止重发", pkt.id);
+        }
+      } else if (pkt.magic == kMagicDone && !done_published_) {
         done_published_ = true;
         std_msgs::msg::Bool m; m.data = true;
         done_pub_->publish(m);
@@ -622,6 +681,8 @@ private:
         if (!has_flight_enable_id_ || pkt.id != last_flight_enable_id_) {
           has_flight_enable_id_ = true;
           last_flight_enable_id_ = pkt.id;
+          flight_enable_received_ = true;
+          airborne_samples_ = 0;
           std_msgs::msg::Bool m; m.data = true;
           flight_enable_pub_->publish(m);
           RCLCPP_INFO(get_logger(),
@@ -635,6 +696,7 @@ private:
   std::string car_ip_;
   int to_car_port_, from_car_port_, resend_count_;
   double send_hz_, pose_hz_;
+  int airborne_height_cm_{60}, airborne_required_samples_{2};
   // 飞车开机朝向(场地系,度)与由它算出的场地系→map 系旋转量 α 及其 cos/sin
   double start_heading_field_deg_, field_to_map_deg_, cos_a_, sin_a_;
   double field_origin_x_m_{0.0}, field_origin_y_m_{0.0};  // 飞车起点(场地系,米):场地→map 减它
@@ -649,12 +711,20 @@ private:
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
   double yolo_conf_thresh_;
   int yolo_debounce_;
+  bool yolo_trigger_rescuee_event_{false};
 
   int tx_fd_{-1}, rx_fd_{-1};
   sockaddr_in car_addr_{};
 
   uint16_t req_id_{0}, obst_id_{0}, rescuee_id_{0};
   int req_remaining_{0}, obst_remaining_{0}, rescuee_remaining_{0};
+  bool flight_enable_received_{false};
+  bool airborne_sent_{false};
+  int airborne_samples_{0};
+  uint16_t airborne_id_{0};
+  int airborne_remaining_{0};
+  int airborne_retry_ticks_{0};
+  bool airborne_acked_{false};
   std::vector<float> obst_payload_;
   bool done_published_{false};
   bool confirm_published_{false};
@@ -683,6 +753,7 @@ private:
   rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr obst_sub_;
   rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr det_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr status_sub_;
+  rclcpp::Subscription<std_msgs::msg::Int16>::SharedPtr height_sub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr done_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr confirm_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr start_pub_;

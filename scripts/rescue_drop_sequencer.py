@@ -25,7 +25,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import (QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile,
                        QoSReliabilityPolicy)
-from std_msgs.msg import Bool, Float32MultiArray, Int16MultiArray
+from std_msgs.msg import Bool, Float32MultiArray, Int16, Int16MultiArray
 
 import tf2_ros
 
@@ -41,6 +41,8 @@ class RescueDropSequencer(Node):
         self.hold_yaw = 0.0
         self.cruise_z = None       # 进中断前的高度,升回时用
         self.t_state = 0.0
+        self.has_height = False
+        self.current_height_cm = 0.0
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
@@ -52,6 +54,9 @@ class RescueDropSequencer(Node):
         )
         # 桥是 latched 发的(FC06 → /terminal_confirm),QoS 要对上
         self.create_subscription(Bool, "/terminal_confirm", self.on_confirm, latched)
+        # Cartographer 是 2D，TF 的 z 恒接近 0，绝不能拿它判断是否已降到投放高度。
+        # 飞控串口节点发布的 /height 才是真实激光测高。
+        self.create_subscription(Int16, "/height", self.on_height, 10)
         self.insert_pub = self.create_publisher(
             Float32MultiArray, "/route/insert_waypoints", 10)
         self.servo_pub = self.create_publisher(Int16MultiArray, "/servo_cmd", 10)
@@ -63,8 +68,14 @@ class RescueDropSequencer(Node):
             f"{a.open_deg}°开 → {a.t_drop_s}s → {a.close_deg}°关) 再升回。等 /terminal_confirm ...")
 
     # ---------- TF ----------
+    def on_height(self, msg):
+        self.current_height_cm = float(msg.data)
+        self.has_height = True
+
     def pose(self):
-        """本机 map→laser_link。返回 (x_cm, y_cm, z_cm, yaw_deg) 或 None。"""
+        """TF 取 x/y/yaw，真实 /height 取 z。"""
+        if not self.has_height:
+            return None
         try:
             tf = self.tf_buffer.lookup_transform("map", "laser_link", rclpy.time.Time())
         except Exception:
@@ -74,7 +85,7 @@ class RescueDropSequencer(Node):
         yaw = math.degrees(math.atan2(
             2.0 * (q.w * q.z + q.x * q.y),
             1.0 - 2.0 * (q.y ** 2 + q.z ** 2)))
-        return (t.x * 100.0, t.y * 100.0, t.z * 100.0, yaw)
+        return (t.x * 100.0, t.y * 100.0, self.current_height_cm, yaw)
 
     def insert(self, x_cm, y_cm, z_cm, yaw_deg):
         m = Float32MultiArray()
@@ -93,6 +104,9 @@ class RescueDropSequencer(Node):
             return
         if self.state != IDLE:
             self.get_logger().info(f"投放进行中(state={self.state}),忽略重复确认")
+            return
+        if not self.has_height:
+            self.get_logger().error("还没收到 /height,这次投放取消(高度不明不敢开舱)")
             return
         p = self.pose()
         if p is None:
