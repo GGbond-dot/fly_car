@@ -7,6 +7,7 @@
 
 #include <tf2/exceptions.h>
 #include <tf2/LinearMath/Matrix3x3.h>
+#include <rcl_interfaces/msg/set_parameters_result.hpp>
 
 namespace uart_to_stm32
 {
@@ -69,11 +70,34 @@ bool UartToStm32::initialize(double update_rate, const std::string & source_fram
       "/target_velocity", 10,
       std::bind(&UartToStm32::targetVelocityCallback, this, std::placeholders::_1));
 
+    laser_ground_height_sub_ = node_->create_subscription<std_msgs::msg::Int16>(
+      "/laser_array/ground_height", rclcpp::QoS(10),
+      std::bind(&UartToStm32::laserGroundHeightCallback, this, std::placeholders::_1));
+
     height_pub_ = node_->create_publisher<std_msgs::msg::Int16>("/height", 10);
+    height_raw_stm32_pub_ = node_->create_publisher<std_msgs::msg::Int16>("/height_raw_stm32", 10);
     is_st_ready_pub_ = node_->create_publisher<std_msgs::msg::UInt8>("/is_st_ready", rclcpp::QoS(10).transient_local());
     mission_step_pub_ = node_->create_publisher<std_msgs::msg::UInt8>("/mission_step", 10);
 
     has_st_ready_pub_ = false;
+
+    // 标志位:高度源切换(默认 false=STM32 单点激光)。ros2 param set 可热切换。
+    use_laser_array_height_ = node_->declare_parameter<bool>("use_laser_array_height", false);
+    param_cb_handle_ = node_->add_on_set_parameters_callback(
+      [this](const std::vector<rclcpp::Parameter> & params) {
+        rcl_interfaces::msg::SetParametersResult result;
+        result.successful = true;
+        for (const auto & p : params) {
+          if (p.get_name() == "use_laser_array_height") {
+            use_laser_array_height_ = p.as_bool();
+            RCLCPP_WARN(node_->get_logger(), "高度源切换 -> %s",
+              use_laser_array_height_ ? "面阵激光(替换+回传STM32)" : "STM32单点激光(原样)");
+          }
+        }
+        return result;
+      });
+    RCLCPP_INFO(node_->get_logger(), "高度源初始 = %s",
+      use_laser_array_height_ ? "面阵激光" : "STM32单点激光");
 
     serial_comm_->start_protocol_receive(
       [this](uint8_t id, const std::vector<uint8_t> & data) { protocolDataHandler(id, data); },
@@ -287,6 +311,39 @@ void UartToStm32::sendTargetVelocityToSerial(float vx_cm_per_s, float vy_cm_per_
   }
 }
 
+void UartToStm32::laserGroundHeightCallback(const std_msgs::msg::Int16::SharedPtr msg)
+{
+  // 标志位=STM32 时,面阵激光既不占据 /height 也不回传,完全旁路。
+  if (!use_laser_array_height_) {
+    return;
+  }
+  // 替换:面阵高度成为飞控 PID/mux 用的 /height
+  if (height_pub_) {
+    height_pub_->publish(*msg);
+  }
+  // 回传:把面阵高度用 0x07 帧下发 STM32,供飞控内部定高
+  sendLaserGroundHeightToSerial(msg->data);
+  RCLCPP_INFO_THROTTLE(node_->get_logger(), *node_->get_clock(), 1000,
+    "Published /height(面阵) + 回传STM32: %d", static_cast<int>(msg->data));
+}
+
+void UartToStm32::sendLaserGroundHeightToSerial(int16_t height_cm)
+{
+  if (!serial_comm_ || !serial_comm_->is_open()) {
+    RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 5000,
+      "Serial port is not open, cannot send laser ground height");
+    return;
+  }
+  std::vector<uint8_t> data(2);
+  data[0] = static_cast<uint8_t>(height_cm & 0xFF);
+  data[1] = static_cast<uint8_t>((height_cm >> 8) & 0xFF);
+  if (!serial_comm_->send_protocol_data(
+        LASER_GROUND_HEIGHT_FRAME_ID, static_cast<uint8_t>(data.size()), data)) {
+    RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 5000,
+      "Failed to send laser ground height: %s", serial_comm_->get_last_error().c_str());
+  }
+}
+
 void UartToStm32::protocolDataHandler(uint8_t id, const std::vector<uint8_t> & data)
 {
   switch (id) {
@@ -328,22 +385,20 @@ void UartToStm32::protocolDataHandler(uint8_t id, const std::vector<uint8_t> & d
       }
       const int16_t raw_value = static_cast<int16_t>(static_cast<uint16_t>(data[0]) |
         (static_cast<uint16_t>(data[1]) << 8));
-      // 激光测高离地太近时会吐出很大的无效值（现场见 5120）。飞车任务最高
-      // 只有约 100cm，超过 200cm 一律按近地 2cm 处理，避免 mux 误切飞行态、
-      // 高度 PID 持续下压。
-      const int16_t value = raw_value > 200 ? 2 : raw_value;
+      // 高度上限钳位已取消：原始测高值直接发布，异常值的滤波交给下游
+      // （面阵激光 laser_array_ground_node 的空间/时间滤波）处理。
+      const int16_t value = raw_value;
       std_msgs::msg::Int16 msg;
       msg.data = value;
-      if (height_pub_) {
+      // STM32 单点激光原值始终发到 /height_raw_stm32(诊断/对比用,不受标志位影响)
+      if (height_raw_stm32_pub_) {
+        height_raw_stm32_pub_->publish(msg);
+      }
+      // 高度源=STM32 时才占据 /height;=面阵时 /height 由面阵回调发布,这里不发以免两源打架
+      if (!use_laser_array_height_ && height_pub_) {
         height_pub_->publish(msg);
-        if (raw_value > 200) {
-          RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 2000,
-            "Invalid near-ground height %dcm (>200), clamp to 2cm", raw_value);
-        }
         RCLCPP_INFO_THROTTLE(node_->get_logger(), *node_->get_clock(), 1000,
-          "Published /height: %d", value);
-      } else {
-        RCLCPP_WARN(node_->get_logger(), "Height publisher not initialized");
+          "Published /height(STM32单点): %d", value);
       }
       break;
     }

@@ -33,10 +33,13 @@ install(TARGETS
   DESTINATION lib/${PROJECT_NAME}
 )
 
-# Python 串口桥(SR5E1E3 $VW) + 轮速 bias 开环测量探针
+# Python 串口桥(SR5E1E3 $VW 下行 + $RPM4 四轮上行) + 轮速 bias 开环测量探针
+# + 四驱健康监控 + 走直测试(自带结论表)
 install(PROGRAMS
   scripts/chassis_bridge.py
   scripts/bias_probe.py
+  scripts/wheel_health_monitor.py
+  scripts/straight_line_test.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

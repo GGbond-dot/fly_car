@@ -1,6 +1,7 @@
 #ifndef UART_TO_STM32__UART_TO_STM32_HPP_
 #define UART_TO_STM32__UART_TO_STM32_HPP_
 
+#include <atomic>
 #include <memory>
 #include <string>
 #include <vector>
@@ -38,6 +39,8 @@ private:
   void sendVelocityToSerial(const Eigen::Vector3d & transformed_velocity);
   void sendTargetVelocityToSerial(float vx_cm_per_s, float vy_cm_per_s, float vz_cm_per_s, float vyaw_deg_per_s);
   void sendA2ReadyResponse();
+  void laserGroundHeightCallback(const std_msgs::msg::Int16::SharedPtr msg);
+  void sendLaserGroundHeightToSerial(int16_t height_cm);
   void protocolDataHandler(uint8_t id, const std::vector<uint8_t> & data);
 
   rclcpp::Node::SharedPtr node_;
@@ -50,12 +53,19 @@ private:
 
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr velocity_sub_;
   rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr target_velocity_sub_;
+  rclcpp::Subscription<std_msgs::msg::Int16>::SharedPtr laser_ground_height_sub_;
 
   std::unique_ptr<serial_comm::SerialComm> serial_comm_;
 
   rclcpp::Publisher<std_msgs::msg::Int16>::SharedPtr height_pub_;
+  rclcpp::Publisher<std_msgs::msg::Int16>::SharedPtr height_raw_stm32_pub_;
   rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr is_st_ready_pub_;
   rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr mission_step_pub_;
+
+  // 标志位:false=/height 用 STM32 单点激光(默认,原样);true=/height 用面阵激光
+  // 且把面阵高度用 0x07 帧回传 STM32 定高。可 ros2 param set 热切换。
+  std::atomic<bool> use_laser_array_height_{false};
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_cb_handle_;
 
   double current_yaw_;
   bool yaw_valid_;
@@ -67,6 +77,7 @@ private:
   static constexpr uint8_t TARGET_VELOCITY_FRAME_ID = 0x31;
   static constexpr uint8_t ST_READY_QUERY_ID = 0xF1;
   static constexpr uint8_t A2_READY_RESP_ID = 0xA2;
+  static constexpr uint8_t LASER_GROUND_HEIGHT_FRAME_ID = 0x07;  // 2B int16 小端, cm
 };
 
 }  // namespace uart_to_stm32
